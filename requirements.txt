@@ -1,0 +1,6 @@
+torch>=2.2
+transformers>=4.44
+peft>=0.12
+accelerate>=0.34
+safetensors>=0.4
+psutil>=5.9

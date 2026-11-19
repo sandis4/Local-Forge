@@ -1,0 +1,20 @@
+[package]
+name = "local-forge"
+version = "0.2.0-beta.1"
+edition = "2021"
+description = "Простой запуск дообучения Forge: полная настройка, проверка и живые метрики"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+# GUI: Material 3 рисуем сами на egui (чистый Rust, без web-стека)
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
