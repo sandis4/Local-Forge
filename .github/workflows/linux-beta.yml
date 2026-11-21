@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: System dependencies
         run: |
@@ -31,12 +31,12 @@ jobs:
       - name: Fetch llama.cpp Linux binaries
         run: |
           mkdir -p llama_tmp llama_bin
-          url=$(curl -fsSL https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
-            | jq -r '.assets[] | select(.name | test("ubuntu-x64\\.zip$")) | .browser_download_url' \
-            | head -1)
+          url=$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30" \
+            | jq -r '[.[].assets[] | select(.name | test("^llama-.*-bin-ubuntu-x64\\.tar\\.gz$"))][0].browser_download_url')
           test -n "$url"
-          curl -fL "$url" -o llama.zip
-          unzip -q llama.zip -d llama_tmp
+          test "$url" != "null"
+          curl -fL "$url" -o llama.tar.gz
+          tar -xzf llama.tar.gz -C llama_tmp
           server=$(find llama_tmp -type f -name llama-server | head -1)
           test -n "$server"
           cp -a "$(dirname "$server")"/. llama_bin/
