@@ -645,34 +645,51 @@ fn resolve_python(explicit: Option<&String>) -> String {
                     }
                 }
             }
-            // Вендинсталляция из setup.bat: <корень>/.venv
+            // Вендинсталляция из setup.bat / setup.sh: <корень>/.venv
             for cand in [dir.join(".venv"), dir.join("python").join(".venv")] {
-                let py = cand.join("Scripts").join("python.exe");
+                let py = if cfg!(windows) {
+                    cand.join("Scripts").join("python.exe")
+                } else {
+                    cand.join("bin").join("python3")
+                };
+                if py.is_file() {
+                    return py.to_string_lossy().into_owned();
+                }
+                let py = if cfg!(windows) {
+                    cand.join("Scripts").join("python.exe")
+                } else {
+                    cand.join("bin").join("python")
+                };
                 if py.is_file() {
                     return py.to_string_lossy().into_owned();
                 }
             }
         }
     }
-    // PATH: только реальные .exe, в порядке PATH
+    // PATH: только реальные исполняемые файлы, в порядке PATH
     if let Some(paths) = std::env::var_os("PATH") {
-        let mut py_launcher: Option<PathBuf> = None;
+        let names: &[&str] = if cfg!(windows) {
+            &["python.exe", "python3.exe"]
+        } else {
+            &["python3", "python"]
+        };
         for dir in std::env::split_paths(&paths) {
-            for name in ["python.exe", "python3.exe"] {
+            for name in names {
                 let cand = dir.join(name);
                 if cand.is_file() {
                     return cand.to_string_lossy().into_owned();
                 }
             }
-            if py_launcher.is_none() {
-                let py = dir.join("py.exe");
-                if py.is_file() {
-                    py_launcher = Some(py);
+        }
+        if cfg!(windows) {
+            if let Some(paths) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&paths) {
+                    let py = dir.join("py.exe");
+                    if py.is_file() {
+                        return py.to_string_lossy().into_owned();
+                    }
                 }
             }
-        }
-        if let Some(py) = py_launcher {
-            return py.to_string_lossy().into_owned();
         }
     }
     "python".to_string()

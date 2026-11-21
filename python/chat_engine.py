@@ -988,7 +988,7 @@ class GgufBackend:
     def start(self):
         exe = find_llama_server()
         if not exe:
-            raise RuntimeError("не найден llama_bin/llama-server.exe — GGUF-путь недоступен")
+            raise RuntimeError("не найден llama_bin/llama-server (или llama-server.exe) — GGUF-путь недоступен")
         try:
             size = os.path.getsize(self.model)
         except OSError:

@@ -366,3 +366,9 @@ Heretic (опционально): установи [uv](https://docs.astral.sh/u
 ### Лицензия
 
 Проект распространяется под **AGPL-3.0-or-later**, потому что включает Heretic 2.1.0. Если вынести Heretic в отдельную опциональную зависимость, лицензию Local Forge можно сменить.
+
+---
+
+## Linux
+
+Linux-бета: см. [README_LINUX.md](README_LINUX.md). Сборка через GitHub Actions (`Linux beta`) или локально `cargo build --release` + `./setup.sh`.

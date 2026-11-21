@@ -1,0 +1,68 @@
+name: Linux beta
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config jq unzip rsync \
+            libxkbcommon-dev libwayland-dev libx11-dev libxi-dev libgl1-mesa-dev \
+            python3 python3-venv
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Rust GUI
+        run: cargo build --release
+
+      - name: Fetch llama.cpp Linux binaries
+        run: |
+          mkdir -p llama_tmp llama_bin
+          url=$(curl -fsSL https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
+            | jq -r '.assets[] | select(.name | test("ubuntu-x64\\.zip$")) | .browser_download_url' \
+            | head -1)
+          test -n "$url"
+          curl -fL "$url" -o llama.zip
+          unzip -q llama.zip -d llama_tmp
+          server=$(find llama_tmp -type f -name llama-server | head -1)
+          test -n "$server"
+          cp -a "$(dirname "$server")"/. llama_bin/
+
+      - name: Stage release
+        run: |
+          VERSION=0.2.0-beta.1
+          ROOT=dist/stage/local-forge-${VERSION}-linux-x64
+          mkdir -p "$ROOT"
+          cp target/release/local-forge "$ROOT/local-forge"
+          cp requirements.txt setup.sh setup_heretic.sh README_LINUX.md LICENSE THIRD_PARTY_NOTICES.md "$ROOT/"
+          rsync -a --exclude '__pycache__' --exclude 'output_model' --exclude '.venv' \
+            python/ "$ROOT/python/"
+          rsync -a --exclude '.venv' --exclude '__pycache__' --exclude 'checkpoints*' \
+            heretic-2.1.0/ "$ROOT/heretic-2.1.0/"
+          cp -a llama_bin "$ROOT/llama_bin"
+          chmod +x "$ROOT/local-forge" "$ROOT/setup.sh" "$ROOT/setup_heretic.sh"
+          tar -C dist/stage -czf "dist/local-forge-${VERSION}-linux-x64.tar.gz" "local-forge-${VERSION}-linux-x64"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: local-forge-linux-x64
+          path: dist/local-forge-*-linux-x64.tar.gz
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/local-forge-*-linux-x64.tar.gz

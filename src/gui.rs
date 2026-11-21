@@ -1973,7 +1973,18 @@ impl GuiApp {
             Phase::Done => {
                 if theme::button(ui, &self.theme, tr("Открыть папку"), ButtonKind::Tonal, true).clicked() {
                     let dir = self.base.ws.join(self.form.out.trim());
-                    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                    #[cfg(windows)]
+                    {
+                        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = std::process::Command::new("open").arg(&dir).spawn();
+                    }
                 }
                 if theme::button(ui, &self.theme, tr("Ещё раз"), ButtonKind::Filled, true).clicked() {
                     self.phase = Phase::Setup;

@@ -4,6 +4,28 @@
 //! Работает внутри окна приложения — без системного «Обзора папок».
 
 use crate::i18n::tr;
+
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOME").ok().map(PathBuf::from)
+    }
+}
+
+fn default_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from("C:\\")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/")
+    }
+}
 use std::path::PathBuf;
 
 use eframe::egui::{self, RichText};
@@ -38,8 +60,8 @@ impl FolderPicker {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
-            .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("C:\\"));
+            .or_else(home_dir)
+            .unwrap_or_else(default_root);
         if start_dir.is_dir() {
             picker.open(start_dir);
         } else {
@@ -55,11 +77,20 @@ impl FolderPicker {
         match &self.current {
             None => {
                 self.path_input = tr("Этот компьютер").into();
-                for letter in b'A'..=b'Z' {
-                    let root = PathBuf::from(format!("{}:\\", letter as char));
-                    if root.is_dir() {
-                        self.entries.push(root);
+                #[cfg(windows)]
+                {
+                    for letter in b'A'..=b'Z' {
+                        let root = PathBuf::from(format!("{}:\\", letter as char));
+                        if root.is_dir() {
+                            self.entries.push(root);
+                        }
                     }
+                }
+                #[cfg(not(windows))]
+                {
+                    self.current = Some(PathBuf::from("/"));
+                    self.refresh();
+                    return;
                 }
             }
             Some(dir) => {
@@ -118,17 +149,16 @@ impl FolderPicker {
     }
 
     fn go_home(&mut self) {
-        if let Ok(home) = std::env::var("USERPROFILE") {
-            let path = PathBuf::from(home);
-            if path.is_dir() {
-                self.open(path);
+        if let Some(home) = home_dir() {
+            if home.is_dir() {
+                self.open(home);
             }
         }
     }
 
     fn go_desktop(&mut self) {
-        if let Ok(home) = std::env::var("USERPROFILE") {
-            let path = PathBuf::from(home).join("Desktop");
+        if let Some(home) = home_dir() {
+            let path = home.join("Desktop");
             if path.is_dir() {
                 self.open(path);
             }

@@ -33,7 +33,34 @@ pub fn ram() -> (f64, f64) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn ram() -> (f64, f64) {
+    let text = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let mut total = 0.0;
+    let mut avail = 0.0;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("MemTotal:") {
+            total = v
+                .trim()
+                .trim_end_matches(" kB")
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                / 1e6;
+        } else if let Some(v) = line.strip_prefix("MemAvailable:") {
+            avail = v
+                .trim()
+                .trim_end_matches(" kB")
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                / 1e6;
+        }
+    }
+    (avail, total)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn ram() -> (f64, f64) {
     (0.0, 0.0)
 }
