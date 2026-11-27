@@ -137,7 +137,6 @@ pub struct Chat {
     pub web_note: String,
     show_adv: bool,
     workspace: String,
-    auto_load: bool,
     scan_rx: Option<std::sync::mpsc::Receiver<(Vec<ModelEntry>, Vec<String>)>>,
     params_rx: Option<std::sync::mpsc::Receiver<Vec<(String, Option<u64>)>>>,
     engine: Option<Runner>,
@@ -397,7 +396,6 @@ impl Chat {
             web_note: String::new(),
             show_adv: false,
             workspace: ws.display().to_string(),
-            auto_load: false,
             scan_rx: None,
             params_rx: None,
             engine: None,
@@ -629,6 +627,34 @@ impl Chat {
         self.web_note.clear();
     }
 
+    /// Выбрать модель без автозапуска: параметры (ctx, потоки, KV) можно
+    /// поменять до нажатия «Загрузить модель». Старый движок гасим, чтобы
+    /// статус Ready не относился к уже другой модели.
+    pub fn select_model(&mut self, path: String) {
+        if self.model == path || self.is_busy() {
+            return;
+        }
+        self.model = path;
+        self.new_chat();
+        self.unload();
+    }
+
+    fn unload(&mut self) {
+        if let Some(mut r) = self.engine.take() {
+            let _ = r.send("{\"cmd\":\"shutdown\"}");
+            let _ = r.wait_exit(std::time::Duration::from_secs(3));
+            r.kill();
+        }
+        self.status = Status::Unloaded;
+        self.backend.clear();
+        self.info.clear();
+        self.loading_msg.clear();
+        self.tok_s = None;
+        self.api_running = false;
+        self.api_url.clear();
+        self.api_note.clear();
+    }
+
     pub fn poll(&mut self) {
         let lines: Vec<String> = match self.engine.as_mut() {
             Some(r) => r.drain(),
@@ -776,9 +802,7 @@ impl Chat {
                 for m in &models {
                     let line = entry_label(m);
                     if ui.selectable_label(self.model == m.path, line).clicked() {
-                        self.model = m.path.clone();
-                        self.new_chat();
-                        self.auto_load = true;
+                        self.select_model(m.path.clone());
                         ui.close_menu();
                     }
                 }
@@ -837,10 +861,6 @@ impl Chat {
                 }
             });
         });
-        if self.auto_load && self.status != Status::Loading {
-            self.auto_load = false;
-            self.load(python, engine_dir, ws);
-        }
         ui.add_space(6.0);
 
         if let Some(err) = &self.error {
@@ -864,7 +884,7 @@ impl Chat {
                             crate::tf!("{params} · {:.0} МБ", "{params} · {:.0} MB", m.size_mb)
                         }
                     }
-                    None => tr("Выбери модель сверху — она загрузится сама.").to_string(),
+                    None => tr("Выбери модель сверху.").to_string(),
                 },
                 Status::Loading => crate::tf!("Загружаю… {}", "Loading… {}", self.loading_msg),
                 Status::Ready => format!("{} · {}", self.model, self.info),
@@ -1145,7 +1165,15 @@ impl Chat {
                         ui.label(theme.label(tr("загружаю модель…")));
                     }
                     Status::Unloaded => {
-                        theme::chip(ui, theme, tr("модель не выбрана"));
+                        if self.model.is_empty() {
+                            theme::chip(ui, theme, tr("модель не выбрана"));
+                        } else if theme::button(
+                            ui, theme, tr("Загрузить модель"), ButtonKind::Tonal, !busy,
+                        )
+                        .clicked()
+                        {
+                            self.load(python, engine_dir, ws);
+                        }
                     }
                 }
                 }
@@ -1446,5 +1474,14 @@ mod tests {
         assert_eq!(active_hint("Forge-1-E2B-Q4_K_M").as_deref(), Some(tr("2B акт.")));
         assert_eq!(active_hint("Qwen2.5-1.5B-Instruct"), None);
         assert_eq!(active_hint("train.jsonl"), None);
+    }
+
+    #[test]
+    fn selecting_model_waits_for_explicit_load() {
+        let mut chat = Chat::new(std::path::Path::new(".."));
+        chat.status = Status::Ready;
+        chat.select_model("models_gguf/other.gguf".into());
+        assert_eq!(chat.model, "models_gguf/other.gguf");
+        assert!(chat.status == Status::Unloaded, "выбор модели не должен запускать загрузку");
     }
 }

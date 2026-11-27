@@ -1555,8 +1555,7 @@ impl GuiApp {
         );
         match action {
             Some(crate::downloads::HubAction::UseModel(path)) => {
-                self.chat.model = path;
-                self.chat.new_chat();
+                self.chat.select_model(path);
                 self.tab = Tab::Chat;
                 self.content_alpha = 0.0;
             }

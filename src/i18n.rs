@@ -74,7 +74,7 @@ fn en(text: &'static str) -> &'static str {
         "Вставь команду main.py — флаги заполнят настройки ниже и запустят проверку." => "Paste a main.py command — the flags fill the settings below and run a check.",
         "Выбери квант" => "Choose a quant",
         "Выбери модель" => "Choose a model",
-        "Выбери модель сверху — она загрузится сама." => "Pick a model above — it loads automatically.",
+        "Выбери модель сверху." => "Pick a model above.",
         "Выбери модель слева, чтобы увидеть файлы и скачать." => "Pick a model on the left to see files and download.",
         "Выбери файл в списке" => "Choose a file in the list",
         "Выбор папки" => "Folder picker",
