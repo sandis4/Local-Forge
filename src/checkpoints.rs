@@ -69,7 +69,7 @@ pub fn scan(out: &Path) -> Vec<Row> {
         rows.push(Row {
             name: tr("training_state (позиция в данных)").into(),
             step: None,
-            size_mb: dir_size(&state) as f64 / (1024.0 * 1024.0),
+            size_mb: fs::metadata(&state).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0),
             modified,
         });
     }
@@ -103,24 +103,24 @@ fn ago(t: SystemTime) -> String {
 
 pub fn print(out: &Path) {
     if !out.exists() {
-        crate::tf!("Папки '{}' нет — обучение ещё не запускалось.", "Folder '{}' does not exist — training has not started yet.", out.display());
+        println!("{}", crate::tf!("Папки '{}' нет — обучение ещё не запускалось.", "Folder '{}' does not exist — training has not started yet.", out.display()));
         return;
     }
     let rows = scan(out);
     if rows.is_empty() {
-        crate::tf!("В '{}' нет чекпоинтов.", "No checkpoints in '{}'.", out.display());
+        println!("{}", crate::tf!("В '{}' нет чекпоинтов.", "No checkpoints in '{}'.", out.display()));
         return;
     }
     println!("{:<40} {:>8}  {:>10}  {}", tr("чекпоинт"), tr("шаг"), tr("размер"), tr("изменён"));
     println!("{}", "-".repeat(80));
     for r in rows {
         let step = r.step.map(|s| s.to_string()).unwrap_or_else(|| "—".into());
-        crate::tf!("{:<40} {:>8}  {:>8.1} МБ  {}", "{:<40} {:>8}  {:>8.1} MB  {}",
+        println!("{}", crate::tf!("{:<40} {:>8}  {:>8.1} МБ  {}", "{:<40} {:>8}  {:>8.1} MB  {}",
             r.name,
             step,
             r.size_mb,
             ago(r.modified)
-        );
+        ));
     }
 }
 

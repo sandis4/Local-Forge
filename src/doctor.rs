@@ -20,13 +20,13 @@ try:
     for w in plan.get("warnings", []):
         print("  [!]", w)
 except Exception as e:
-    print(tr("Не удалось построить автоплан:"), e)
+    print("Не удалось построить автоплан:", e)
 "#;
 
 pub fn run(python: &str, engine: &Path, model: &Path) -> std::io::Result<i32> {
     println!("python: {python}");
-    crate::tf!("движок: {}", "engine: {}", engine.display());
-    crate::tf!("модель: {}", "model: {}", model.display());
+    println!("{}", crate::tf!("движок: {}", "engine: {}", engine.display()));
+    println!("{}", crate::tf!("модель: {}", "model: {}", model.display()));
     println!();
     let mut cmd = Command::new(python);
     #[cfg(windows)]

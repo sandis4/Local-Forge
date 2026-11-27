@@ -543,7 +543,7 @@ fn log_error(msg: &str) {
 fn report_error(msg: &str) {
     log_error(msg);
     if has_console() {
-        crate::tf!("Ошибка: {msg}", "Error: {msg}");
+        println!("{}", crate::tf!("Ошибка: {msg}", "Error: {msg}"));
     } else {
         show_message_box("Forge Train", msg);
     }
@@ -646,22 +646,17 @@ fn resolve_python(explicit: Option<&String>) -> String {
                 }
             }
             // Вендинсталляция из setup.bat / setup.sh: <корень>/.venv
+            let (venv_bin, venv_names): (&str, &[&str]) = if cfg!(windows) {
+                ("Scripts", &["python.exe"])
+            } else {
+                ("bin", &["python3", "python"])
+            };
             for cand in [dir.join(".venv"), dir.join("python").join(".venv")] {
-                let py = if cfg!(windows) {
-                    cand.join("Scripts").join("python.exe")
-                } else {
-                    cand.join("bin").join("python3")
-                };
-                if py.is_file() {
-                    return py.to_string_lossy().into_owned();
-                }
-                let py = if cfg!(windows) {
-                    cand.join("Scripts").join("python.exe")
-                } else {
-                    cand.join("bin").join("python")
-                };
-                if py.is_file() {
-                    return py.to_string_lossy().into_owned();
+                for name in venv_names {
+                    let py = cand.join(venv_bin).join(name);
+                    if py.is_file() {
+                        return py.to_string_lossy().into_owned();
+                    }
                 }
             }
         }
@@ -682,12 +677,10 @@ fn resolve_python(explicit: Option<&String>) -> String {
             }
         }
         if cfg!(windows) {
-            if let Some(paths) = std::env::var_os("PATH") {
-                for dir in std::env::split_paths(&paths) {
-                    let py = dir.join("py.exe");
-                    if py.is_file() {
-                        return py.to_string_lossy().into_owned();
-                    }
+            for dir in std::env::split_paths(&paths) {
+                let py = dir.join("py.exe");
+                if py.is_file() {
+                    return py.to_string_lossy().into_owned();
                 }
             }
         }
@@ -778,7 +771,7 @@ fn run(a: RunArgs) -> Result<i32, String> {
         match gui::run(launch.clone(), a.start, &a.tab, a.theme.as_deref()) {
             Ok(()) => return Ok(0),
             Err(e) => {
-                crate::tf!("Не удалось открыть окно ({e}) — запускаю в терминале.", "Failed to open the window ({e}) — starting in the terminal.");
+                println!("{}", crate::tf!("Не удалось открыть окно ({e}) — запускаю в терминале.", "Failed to open the window ({e}) — starting in the terminal."));
             }
         }
     }
@@ -800,21 +793,21 @@ fn run(a: RunArgs) -> Result<i32, String> {
     } else {
         if !ui::stdout_is_tty() {
             println!("$ {cmdline}");
-            crate::tf!("(вывод перенаправлен — обычный режим, дашборд отключён)", "(output redirected — normal mode, dashboard disabled)");
+            println!("{}", crate::tf!("(вывод перенаправлен — обычный режим, дашборд отключён)", "(output redirected — normal mode, dashboard disabled)"));
         }
         ui::run_plain(runner, app).map_err(|e| crate::tf!("ошибка запуска: {e}", "launch error: {e}"))?
     };
 
     println!();
     if code == 0 {
-        crate::tf!("Готово. Адаптеры и чекпоинты: {}", "Done. Adapters and checkpoints: {}", launch.out);
+        println!("{}", crate::tf!("Готово. Адаптеры и чекпоинты: {}", "Done. Adapters and checkpoints: {}", launch.out));
         println!("{}", crate::tf!(
             "Проверить в чате:  python python/test_chat.py --base <модель> --lora {}/final_model",
             "Check in chat:  python python/test_chat.py --base <model> --lora {}/final_model",
             launch.out
         ));
     } else {
-        crate::tf!("Процесс завершился с кодом {code}. Смотри вывод выше.", "Process finished with code {code}. See the output above.");
+        println!("{}", crate::tf!("Процесс завершился с кодом {code}. Смотри вывод выше.", "Process finished with code {code}. See the output above."));
     }
     Ok(code)
 }

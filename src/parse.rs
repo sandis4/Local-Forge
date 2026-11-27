@@ -1,7 +1,19 @@
 //! Разбор строк, которые печатает Python-тренер.
 
-use crate::i18n::tr;
 use std::time::Instant;
+
+// Префиксы stdout-протокола тренера. Они всегда русские: GUI парсит их
+// независимо от языка интерфейса, поэтому через tr() их гонять нельзя.
+const STEP_PREFIX: &str = "[Шаг ";
+const SCHEDULER_PREFIX: &str = "[Шедулер]";
+const EPOCH_PREFIX: &str = "--- Эпоха ";
+const MODEL_PREFIX: &str = "Модель: ";
+const SAVE_PREFIX: &str = "[Сохранение]";
+const FINISHED_MARK: &str = "Обучение завершено";
+const TOTAL_STEPS_MARK: &str = "шагов ~";
+const RAM_PREFIX: &str = "RAM процесса: ";
+const THREADS_PREFIX: &str = "Потоков: ";
+const PROFILE_PREFIX: &str = "Профиль: ";
 
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
@@ -58,16 +70,16 @@ impl Stats {
     pub fn feed(&mut self, line: &str) -> bool {
         let trimmed = line.trim();
 
-        if trimmed.starts_with(tr("[Шаг ")) {
+        if trimmed.starts_with(STEP_PREFIX) {
             self.parse_step(trimmed);
             return true;
         }
-        if trimmed.starts_with(tr("[Шедулер]")) {
+        if trimmed.starts_with(SCHEDULER_PREFIX) {
             if let Some(total) = parse_total_steps(trimmed) {
                 self.total_steps = Some(total);
             }
         }
-        if let Some(rest) = trimmed.strip_prefix(tr("--- Эпоха ")) {
+        if let Some(rest) = trimmed.strip_prefix(EPOCH_PREFIX) {
             let rest = rest.trim_end_matches("---").trim();
             let mut parts = rest.split('/');
             self.epoch = parts.next().and_then(|x| x.trim().parse().ok());
@@ -79,13 +91,13 @@ impl Stats {
         if let Some(rest) = trimmed.strip_prefix("[Padding] ") {
             self.padding = Some(rest.to_string());
         }
-        if let Some(rest) = trimmed.strip_prefix(tr("Модель: ")) {
+        if let Some(rest) = trimmed.strip_prefix(MODEL_PREFIX) {
             self.model = Some(rest.to_string());
         }
-        if trimmed.starts_with(tr("[Сохранение]")) {
+        if trimmed.starts_with(SAVE_PREFIX) {
             self.saves += 1;
         }
-        if trimmed.contains(tr("Обучение завершено")) {
+        if trimmed.contains(FINISHED_MARK) {
             self.finished = true;
         }
         if trimmed.starts_with("Traceback")
@@ -100,7 +112,7 @@ impl Stats {
 
     fn parse_step(&mut self, line: &str) {
         if let Some(end) = line.find(']') {
-            if let Ok(step) = line[tr("[Шаг ").len()..end].trim().parse::<u64>() {
+            if let Ok(step) = line[STEP_PREFIX.len()..end].trim().parse::<u64>() {
                 self.step = step;
             }
         }
@@ -110,11 +122,11 @@ impl Stats {
                 self.loss = v.parse().ok();
             } else if let Some(v) = field(part, "LR: ") {
                 self.lr = v.parse().ok();
-            } else if let Some(v) = field(part, tr("RAM процесса: ")) {
+            } else if let Some(v) = field(part, RAM_PREFIX) {
                 self.ram_mb = v.trim_end_matches("MB").trim().parse().ok();
-            } else if let Some(v) = field(part, tr("Потоков: ")) {
+            } else if let Some(v) = field(part, THREADS_PREFIX) {
                 self.threads = v.parse().ok();
-            } else if let Some(v) = field(part, tr("Профиль: ")) {
+            } else if let Some(v) = field(part, PROFILE_PREFIX) {
                 self.profile = Some(v.to_string());
             }
         }
@@ -122,8 +134,9 @@ impl Stats {
 }
 
 /// "-> шагов ~37, warmup 1." -> 37
-fn parse_total_steps(line: &str) -> Option<u64> {    let idx = line.find(tr("шагов ~"))?;
-    let rest = &line[idx + tr("шагов ~").len()..];
+fn parse_total_steps(line: &str) -> Option<u64> {
+    let idx = line.find(TOTAL_STEPS_MARK)?;
+    let rest = &line[idx + TOTAL_STEPS_MARK.len()..];
     let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     num.parse().ok()
 }
@@ -158,7 +171,7 @@ mod tests {
     #[test]
     fn parses_real_step_line() {
         let mut st = Stats::default();
-        assert!(st.feed(tr("[Шаг 42] Loss: 0.8342 | LR: 1.23e-05 | RAM процесса: 2345MB | Потоков: 8 | Профиль: work")));
+        assert!(st.feed("[Шаг 42] Loss: 0.8342 | LR: 1.23e-05 | RAM процесса: 2345MB | Потоков: 8 | Профиль: work"));
         assert_eq!(st.step, 42);
         assert!((st.loss.unwrap() - 0.8342).abs() < 1e-9);
         assert!((st.lr.unwrap() - 1.23e-5).abs() < 1e-12);
@@ -170,25 +183,25 @@ mod tests {
     #[test]
     fn parses_scheduler_total() {
         let mut st = Stats::default();
-        st.feed(tr("[Шедулер] Сэмплов на эпоху: ~27 (файл 24 + 15% identity) -> шагов ~13, warmup 1. LR обнулится на последнем шаге эпохи, а не раньше."));
+        st.feed("[Шедулер] Сэмплов на эпоху: ~27 (файл 24 + 15% identity) -> шагов ~13, warmup 1. LR обнулится на последнем шаге эпохи, а не раньше.");
         assert_eq!(st.total_steps, Some(13));
     }
 
     #[test]
     fn parses_packing_scheduler_line() {
         let mut st = Stats::default();
-        st.feed(tr("[Шедулер] Packing: средний диалог ~82 токенов, в окно 256 влезает ~3.1 диалогов"));
+        st.feed("[Шедулер] Packing: средний диалог ~82 токенов, в окно 256 влезает ~3.1 диалогов");
         assert_eq!(st.total_steps, None);
-        st.feed(tr("[Шедулер] Сэмплов на эпоху: ~27 (файл 24 + 15% identity) -> шагов ~2, warmup 1."));
+        st.feed("[Шедулер] Сэмплов на эпоху: ~27 (файл 24 + 15% identity) -> шагов ~2, warmup 1.");
         assert_eq!(st.total_steps, Some(2));
     }
 
     #[test]
     fn parses_epoch_padding_model() {
         let mut st = Stats::default();
-        st.feed(tr("--- Эпоха 1/3 ---"));
-        st.feed(tr(" Padding: PACKING — диалоги склеены в окно 256 (блочная маска между документами)"));
-        st.feed(tr(" Модель: models/gemma_base"));
+        st.feed("--- Эпоха 1/3 ---");
+        st.feed(" Padding: PACKING — диалоги склеены в окно 256 (блочная маска между документами)");
+        st.feed(" Модель: models/gemma_base");
         assert_eq!(st.epoch, Some(1));
         assert_eq!(st.epochs, Some(3));
         assert!(st.padding.unwrap().starts_with("PACKING"));
@@ -198,8 +211,8 @@ mod tests {
     #[test]
     fn detects_finish_and_errors() {
         let mut st = Stats::default();
-        st.feed(tr("[Сохранение] Готово! Веса сохранены."));
-        st.feed(tr(" Обучение завершено или остановлено."));
+        st.feed("[Сохранение] Готово! Веса сохранены.");
+        st.feed(" Обучение завершено или остановлено.");
         assert_eq!(st.saves, 1);
         assert!(st.finished);
 
@@ -221,8 +234,8 @@ mod tests {
 
     #[test]
     fn human_duration_formats() {
-        assert_eq!(human_duration(45.0), tr("45с"));
-        assert_eq!(human_duration(125.0), tr("2м 05с"));
-        assert_eq!(human_duration(3600.0 + 600.0), tr("1ч 10м"));
+        assert_eq!(human_duration(45.0), "45с");
+        assert_eq!(human_duration(125.0), "2м 05с");
+        assert_eq!(human_duration(3600.0 + 600.0), "1ч 10м");
     }
 }

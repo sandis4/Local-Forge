@@ -94,6 +94,11 @@ def _file_has_soft(path):
         pass
     return False
 
+def banner(prefix=""):
+    """Разделитель «=» x60. stdout — часть протокола GUI."""
+    print(prefix + "=" * 60)
+
+
 GEMMA4_LITTLE_FORGE_TEMPLATE = (
     "{{ bos_token }}"
     "{%- if messages[0]['role'] == 'system' -%}"
@@ -135,7 +140,7 @@ class CPUTrainer:
         self._cur_line = 0
         self._kd_last = None
         
-        print("=" * 60)
+        banner()
         print(" ИНИЦИАЛИЗАЦИЯ ТРЕНЕРА ДЛЯ CPU (LITTLE FORGE 1 / REFORGE SQUAD)")
         print(f" Модель / Путь: {config.model_name_or_path}")
         print(f" Стартовый профиль: {config.preset}")
@@ -143,7 +148,7 @@ class CPUTrainer:
         print(f" Приоритет процесса: {config.process_priority}")
         if self.resume_checkpoint and os.path.exists(self.resume_checkpoint):
             print(f" Продолжение дообучения с чекпоинта: {self.resume_checkpoint}")
-        print("=" * 60)
+        banner()
 
     def _detect_model_family(self) -> str:
         """Определяем семейство модели по config.json — для условной логики (шаблоны и т.п.)."""
@@ -822,8 +827,8 @@ class CPUTrainer:
                     print(f"[Память] Логиты ~{est_gb:.1f} ГБ (vocab {vs} x seq {self.config.max_length}"
                           f"{' x2 (ORPO)' if mult == 2 else ''}): "
                           f"если будет OOM — уменьши --max_length (сейчас {self.config.max_length}).")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Память] оценка логитов не удалась: {e}", file=sys.stderr)
 
     def _optim_step(self, optimizer, lr_scheduler):
         """Клиппинг + шаг + шедулер с учётом GradScaler (fp16 на CUDA)."""
@@ -1005,8 +1010,8 @@ class CPUTrainer:
             if os.path.exists(path):
                 try:
                     os.replace(path, path + ".prev")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[Состояние] .prev не создан: {e}", file=sys.stderr)
             os.replace(tmp, path)
             print(f"[Состояние] Шаг {self._global_step} (эпоха {self._cur_epoch}, "
                   f"батчей {self._cur_epoch_batches}) сохранён {reason}-> '{path}'")
@@ -1015,8 +1020,8 @@ class CPUTrainer:
             try:
                 if os.path.exists(path + ".tmp"):
                     os.remove(path + ".tmp")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Состояние] .tmp не удалён: {e}", file=sys.stderr)
 
     def _load_training_state(self):
         """Читает снапшот и проверяет совместимость. Возвращает dict или None.
@@ -1030,8 +1035,9 @@ class CPUTrainer:
                     d = torch.load(p, map_location="cpu", weights_only=False)
                     extra = (f" ВНИМАНИЕ: на диске ЕСТЬ состояние на шаге "
                              f"{d.get('global_step')} — ты его игнорируешь и начнёшь с шага 1.")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[Продолжение] не прочитал состояние для предупреждения: {e}",
+                          file=sys.stderr)
             print("[Продолжение] Загрузка состояния отключена (--no_resume_state) — "
                   "стартуем с нуля, но состояние продолжит записываться." + extra)
             return None
@@ -1142,6 +1148,65 @@ class CPUTrainer:
         except Exception as e:
             print(f"[Продолжение] Не удалось восстановить RNG ({e}) — порядок сэмплов может отличаться.")
         return data
+
+    def _resume_context(self, pending, optimizer, lr_scheduler, line_based):
+        """Общий разбор продолжения: состояние на диске + --resume_step.
+        Порядок действий и тексты [Продолжение] — часть протокола GUI."""
+        start_epoch = 0
+        skip_batches = 0
+        global_step = 0
+        if pending is not None:
+            # Порядок важен: сначала шедулер, потом оптимизатор (см. torch docs).
+            # При отказе — чистый старт (свежие optimizer/scheduler уже созданы).
+            optimizer, lr_scheduler, global_step, pending = self._apply_pending_state(
+                optimizer, lr_scheduler, pending)
+            self._opt, self._sched = optimizer, lr_scheduler
+            if pending is not None:
+                start_epoch = pending["epoch"]
+                if line_based and pending.get("line"):
+                    # Продолжение по НОМЕРУ СТРОКИ файла (мгновенно), а не по батчам.
+                    # Старые состояния без "line" — падаем на скип по батчам.
+                    self._cur_line = int(pending["line"])
+                    print(f"[Продолжение] Начинаю с шага {global_step} "
+                          f"(эпоха {start_epoch}, строка файла {self._cur_line} — скип мгновенный).")
+                elif line_based and not pending.get("epoch_batches"):
+                    print(f"[Продолжение] Начинаю с шага {global_step} (эпоха {start_epoch}).")
+                else:
+                    skip_batches = pending["epoch_batches"]
+                    print(f"[Продолжение] Начинаю с шага {global_step} "
+                          f"(эпоха {start_epoch}, пропускаю {skip_batches} пройденных батчей).")
+
+        # Аварийное продолжение без state (файл потерян/битый/после ребута):
+        # веса загружены, шаг/шедулер выставляем вручную, моменты Adam — заново.
+        if self._rs:
+            rs = self._rs
+            for _ in range(rs):
+                lr_scheduler.step()
+            global_step = rs
+            start_epoch = 0
+            if line_based:
+                skip_batches = 0      # позицию уже задали через start_line
+                print(f"[Продолжение] Режим --resume_step: шаг {rs}, "
+                      f"LR={lr_scheduler.get_last_lr()[0]:.2e}. Моменты Adam — заново.")
+            else:
+                skip_batches = rs * self.config.gradient_accumulation_steps
+                print(f"[Продолжение] Режим --resume_step: шаг {rs}, "
+                      f"пропускаю {skip_batches} батчей.")
+        return pending, global_step, start_epoch, skip_batches, optimizer, lr_scheduler
+
+    def _iter_epoch_batches(self, train_loader, epoch, start_epoch, skip_batches):
+        """Итератор батчей эпохи с пропуском уже пройденных при продолжении."""
+        iterator = iter(train_loader)
+        if epoch == start_epoch and skip_batches > 0:
+            print(f"[Продолжение] Пропускаю {skip_batches} уже пройденных батчей эпохи...")
+            for i in range(skip_batches):
+                try:
+                    next(iterator)
+                except StopIteration:
+                    break
+                if (i + 1) % 100 == 0 or (i + 1) == skip_batches:
+                    print(f"[Продолжение] Пропущено {i + 1}/{skip_batches}...")
+        return iterator
 
     def train(self):
         self.load_model_and_tokenizer()
@@ -1292,41 +1357,8 @@ class CPUTrainer:
 
         self._opt, self._sched = optimizer, lr_scheduler
 
-        global_step = 0
-        if pending is not None:
-            # Порядок важен: сначала шедулер, потом оптимизатор (см. torch docs).
-            # При отказе — чистый старт (свежие optimizer/scheduler уже созданы).
-            optimizer, lr_scheduler, global_step, pending = self._apply_pending_state(
-                optimizer, lr_scheduler, pending)
-            self._opt, self._sched = optimizer, lr_scheduler
-            if pending is not None:
-                start_epoch = pending["epoch"]
-                # Продолжение по НОМЕРУ СТРОКИ файла (мгновенно), а не по батчам.
-                # Старые состояния без "line" — падаем на старый скип по батчам.
-                if pending.get("line"):
-                    self._cur_line = int(pending["line"])
-                    skip_batches = 0
-                    print(f"[Продолжение] Начинаю с шага {global_step} "
-                          f"(эпоха {start_epoch}, строка файла {self._cur_line} — скип мгновенный).")
-                elif pending.get("epoch_batches"):
-                    skip_batches = pending["epoch_batches"]
-                    print(f"[Продолжение] Начинаю с шага {global_step} "
-                          f"(эпоха {start_epoch}, пропускаю {skip_batches} пройденных батчей).")
-                else:
-                    skip_batches = 0
-                    print(f"[Продолжение] Начинаю с шага {global_step} (эпоха {start_epoch}).")
-
-        # Аварийное продолжение без state (файл потерян/битый/после ребута):
-        # веса загружены, шаг/шедулер выставляем вручную, моменты Adam — заново.
-        if self._rs:
-            rs = self._rs
-            for _ in range(rs):
-                lr_scheduler.step()
-            global_step = rs
-            start_epoch = 0
-            skip_batches = 0          # позицию уже задали через start_line
-            print(f"[Продолжение] Режим --resume_step: шаг {rs}, "
-                  f"LR={lr_scheduler.get_last_lr()[0]:.2e}. Моменты Adam — заново.")
+        pending, global_step, start_epoch, skip_batches, optimizer, lr_scheduler = \
+            self._resume_context(pending, optimizer, lr_scheduler, line_based=True)
         self._global_step = global_step
 
         self._start_listener()
@@ -1337,7 +1369,7 @@ class CPUTrainer:
               f"grad_accum={self.config.gradient_accumulation_steps} | warmup={warmup_steps} шагов "
               f"(ratio={self.config.warmup_ratio})")
         self._print_dataset_advisory()
-        print("=" * 60)
+        banner()
 
         self.model.train()
         self._maybe_compile()
@@ -1356,17 +1388,7 @@ class CPUTrainer:
             self._cur_epoch = epoch
             self._cur_epoch_batches = 0
             step = 0
-            iterator = iter(train_loader)
-            if epoch == start_epoch and skip_batches > 0:
-                print(f"[Продолжение] Пропускаю {skip_batches} уже пройденных батчей эпохи...")
-                for i in range(skip_batches):
-                    try:
-                        next(iterator)
-                    except StopIteration:
-                        break
-                    if (i + 1) % 100 == 0 or (i + 1) == skip_batches:
-                        print(f"[Продолжение] Пропущено {i + 1}/{skip_batches}...")
-            for batch in iterator:
+            for batch in self._iter_epoch_batches(train_loader, epoch, start_epoch, skip_batches):
                 if self.stop_requested:
                     break
                 self._cur_epoch_batches += 1
@@ -1491,7 +1513,7 @@ class CPUTrainer:
                             weights_dir=os.path.join(self.config.output_dir, "interactive_checkpoint"))
                         gc.collect()
 
-        print("\n" + "=" * 60)
+        banner("\n")
         print(" Обучение завершено или остановлено.")
         self.save_model("final_model")
         # Финал дублируем в interactive_checkpoint: именно оттуда стартует
@@ -1500,7 +1522,7 @@ class CPUTrainer:
         self._save_training_state(
             reason="в финале",
             weights_dir=os.path.join(self.config.output_dir, "interactive_checkpoint"))
-        print("=" * 60)
+        banner()
 
     def _train_orpo(self):
         """ORPO: SFT на chosen + odds-ratio штраф за rejected — один этап,
@@ -1539,38 +1561,19 @@ class CPUTrainer:
         self._start_listener()
 
         pending = self._load_training_state()
-        start_epoch = 0
-        skip_batches = 0
-        global_step = 0
-        if pending is not None:
-            optimizer, lr_scheduler, global_step, pending = self._apply_pending_state(
-                optimizer, lr_scheduler, pending)
-            self._opt, self._sched = optimizer, lr_scheduler
-            if pending is not None:
-                start_epoch = pending["epoch"]
-                skip_batches = pending["epoch_batches"]
-                print(f"[Продолжение] Начинаю с шага {global_step} "
-                      f"(эпоха {start_epoch}, пропускаю {skip_batches} пройденных батчей).")
-
         rs = getattr(self.config, "resume_step", None)
         if isinstance(rs, str) and rs.lower() == "auto":
             rs = self._latest_checkpoint_step()
-        if rs:
-            rs = int(rs)
-            for _ in range(rs):
-                lr_scheduler.step()
-            global_step = rs
-            start_epoch = 0
-            skip_batches = rs * self.config.gradient_accumulation_steps
-            print(f"[Продолжение] Режим --resume_step: шаг {rs}, "
-                  f"пропускаю {skip_batches} батчей.")
+        self._rs = int(rs) if rs else 0
+        pending, global_step, start_epoch, skip_batches, optimizer, lr_scheduler = \
+            self._resume_context(pending, optimizer, lr_scheduler, line_based=False)
         self._global_step = global_step
 
         print(f"\n=== НАЧАЛО ORPO-ОБУЧЕНИЯ (beta={beta}) ===")
         print(f"Файл предпочтений: {orpo_file}")
         print(f"Безопасный старт: LR={self.config.learning_rate:.0e} | max_grad_norm={self.config.max_grad_norm} | "
               f"grad_accum={self.config.gradient_accumulation_steps} | warmup={warmup_steps} шагов")
-        print("=" * 60)
+        banner()
 
         self.model.train()
         self._maybe_compile()
@@ -1587,17 +1590,7 @@ class CPUTrainer:
             self._cur_epoch = epoch
             self._cur_epoch_batches = 0
             step = 0
-            iterator = iter(train_loader)
-            if epoch == start_epoch and skip_batches > 0:
-                print(f"[Продолжение] Пропускаю {skip_batches} уже пройденных батчей эпохи...")
-                for i in range(skip_batches):
-                    try:
-                        next(iterator)
-                    except StopIteration:
-                        break
-                    if (i + 1) % 100 == 0 or (i + 1) == skip_batches:
-                        print(f"[Продолжение] Пропущено {i + 1}/{skip_batches}...")
-            for batch in iterator:
+            for batch in self._iter_epoch_batches(train_loader, epoch, start_epoch, skip_batches):
                 if self.stop_requested:
                     break
                 self._cur_epoch_batches += 1
@@ -1664,14 +1657,14 @@ class CPUTrainer:
                             weights_dir=os.path.join(self.config.output_dir, "interactive_checkpoint"))
                         gc.collect()
 
-        print("\n" + "=" * 60)
+        banner("\n")
         print(" ORPO-обучение завершено или остановлено.")
         self.save_model("final_model")
         self.save_model("interactive_checkpoint")
         self._save_training_state(
             reason="в финале",
             weights_dir=os.path.join(self.config.output_dir, "interactive_checkpoint"))
-        print("=" * 60)
+        banner()
 
     def save_model(self, subfolder: str = ""):
         save_path = os.path.join(self.config.output_dir, subfolder) if subfolder else self.config.output_dir

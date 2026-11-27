@@ -387,15 +387,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 try:
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[API] не удалось отправить [DONE]: {e}", file=sys.stderr)
             except Exception as e:  # noqa: BLE001
                 send({"error": {"message": str(e), "type": "server_error"}})
                 try:
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[API] не удалось отправить [DONE] после ошибки: {e}",
+                          file=sys.stderr)
             return
 
         pieces = []
@@ -1376,26 +1377,30 @@ def main():
     api_port = 8000
     api_host = "auto"
 
+    def emit_api(running=False, url="", note="", error=None, **extra):
+        payload = {"running": running, "key": API_KEY, "model": API_MODEL,
+                   "url": url or "", "note": note}
+        payload.update(extra)
+        if error is not None:
+            payload["error"] = error
+        emit({"ev": "api", **payload})
+
     def stop_api(announce=True):
         nonlocal api
         if api is not None:
             api.stop()
             api = None
         if announce:
-            emit({"ev": "api", "running": False, "key": API_KEY,
-                  "model": API_MODEL, "url": "", "note": "выключен"})
+            emit_api(False, note="выключен")
 
     def start_api(enabled, port, host="auto"):
         nonlocal api
         stop_api(announce=False)
         if not enabled:
-            emit({"ev": "api", "running": False, "key": API_KEY,
-                  "model": API_MODEL, "url": "", "note": "выключен"})
+            emit_api(False, note="выключен")
             return
         if backend is None:
-            emit({"ev": "api", "running": False, "key": API_KEY,
-                  "model": API_MODEL, "url": "",
-                  "note": "Сначала загрузи модель — API поднимется после загрузки"})
+            emit_api(False, note="Сначала загрузи модель — API поднимется после загрузки")
             return
         try:
             port = max(1024, min(65535, int(port or 8000)))
@@ -1406,10 +1411,9 @@ def main():
         try:
             st = server.start()
             api = server
-            emit({"ev": "api", **st})
+            emit_api(**st)
         except Exception as e:  # noqa: BLE001
-            emit({"ev": "api", "running": False, "key": API_KEY, "model": API_MODEL,
-                  "url": "", "note": "не удалось запустить API", "error": str(e)})
+            emit_api(False, note="не удалось запустить API", error=str(e))
 
     def poll_stop():
         while True:
@@ -1473,9 +1477,7 @@ def main():
             except Exception as e:  # noqa: BLE001
                 emit({"ev": "error", "message": str(e)})
                 backend = None
-                emit({"ev": "api", "running": False, "key": API_KEY,
-                      "model": API_MODEL, "url": "",
-                      "note": "API остановлен: модель не загрузилась"})
+                emit_api(False, note="API остановлен: модель не загрузилась")
 
         elif cmd == "api":
             if "enabled" in req:

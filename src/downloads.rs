@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 
 use eframe::egui::{self, RichText, ScrollArea};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::chat::ModelEntry;
@@ -41,6 +42,109 @@ pub struct Section {
     pub title: String,
     pub note: String,
     pub start: usize,
+}
+
+/// События hf_tools.py: `{"type": "...", ...}`.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum HubEvent {
+    #[serde(rename = "profile")]
+    Profile {
+        #[serde(default)]
+        count: usize,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "section")]
+    Section {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        note: String,
+    },
+    #[serde(rename = "item")]
+    Item(ItemPayload),
+    #[serde(rename = "files")]
+    Files {
+        #[serde(default)]
+        items: Option<Vec<FilePayload>>,
+        #[serde(default)]
+        variants: Option<Vec<VariantPayload>>,
+    },
+    #[serde(rename = "progress")]
+    Progress {
+        #[serde(default)]
+        done: u64,
+        #[serde(default)]
+        total: u64,
+        #[serde(default)]
+        file: String,
+    },
+    #[serde(rename = "readme")]
+    Readme {
+        #[serde(default)]
+        text: Option<String>,
+    },
+    #[serde(rename = "preview")]
+    Preview {
+        #[serde(default)]
+        rows: Option<Vec<Value>>,
+        #[serde(default)]
+        file: String,
+    },
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "error")]
+    Error {
+        #[serde(default)]
+        message: Option<String>,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize, Default)]
+struct ItemPayload {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    downloads: u64,
+    #[serde(default)]
+    likes: u64,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    updated: String,
+    #[serde(default)]
+    created: String,
+    #[serde(default, rename = "new")]
+    is_new: bool,
+    #[serde(default)]
+    library: String,
+    #[serde(default)]
+    quant: String,
+    #[serde(default)]
+    file_size: u64,
+    #[serde(default)]
+    verified: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct FilePayload {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    size: u64,
+}
+
+#[derive(Deserialize, Default)]
+struct VariantPayload {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    size: u64,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -84,7 +188,7 @@ pub struct Downloads {
     profile_sort: String,
     profile_count: usize,
     pending_profile: Option<String>,
-    feed_backup: Option<(Vec<Item>, Vec<Section>, Option<usize>)>,
+    feed_backup: Option<(Vec<Item>, Vec<Section>)>,
     pub ram_gb: f32,
     auto_searched: bool,
     auto_select: bool,
@@ -159,22 +263,28 @@ impl Downloads {
         }
     }
 
-    pub fn search(&mut self, python: &str, engine_dir: &Path, ws: &Path) {
-        if self.profile_open {
-            self.profile_open = false;
-            self.profile_author = None;
-            self.feed_backup = None;
-        }
+    /// Сброс результатов/выбора/предпросмотра перед новой выборкой.
+    /// Секции чистит вызывающий: у поиска это зависит от пустого запроса.
+    fn reset_view(&mut self) {
         self.results.clear();
         self.selected = None;
         self.files.clear();
         self.variants.clear();
         self.file_sel = None;
         self.preview.clear();
+        self.readme.clear();
+    }
+
+    pub fn search(&mut self, python: &str, engine_dir: &Path, ws: &Path) {
+        if self.profile_open {
+            self.profile_open = false;
+            self.profile_author = None;
+            self.feed_backup = None;
+        }
+        self.reset_view();
         let kind = self.kind.clone();
         let query = self.query.trim().to_string();
         let sort = self.sort.clone();
-        self.readme.clear();
         self.auto_select = true;
         if kind == "model" && query.is_empty() {
             self.feed_loaded = false;
@@ -213,14 +323,8 @@ impl Downloads {
 
     pub fn load_feed(&mut self, python: &str, engine_dir: &Path, ws: &Path,
                      user: &str, quants: &str, ram_gb: f32, cpu: u32) {
-        self.results.clear();
+        self.reset_view();
         self.sections.clear();
-        self.selected = None;
-        self.files.clear();
-        self.variants.clear();
-        self.file_sel = None;
-        self.preview.clear();
-        self.readme.clear();
         self.feed_loaded = true;
         self.auto_select = true;
         let args = vec![
@@ -249,20 +353,13 @@ impl Downloads {
             self.feed_backup = Some((
                 std::mem::take(&mut self.results),
                 std::mem::take(&mut self.sections),
-                self.selected,
             ));
             self.profile_open = true;
         }
         self.profile_author = Some(author.to_string());
         self.profile_sort = sort.to_string();
-        self.results.clear();
+        self.reset_view();
         self.sections.clear();
-        self.selected = None;
-        self.files.clear();
-        self.variants.clear();
-        self.file_sel = None;
-        self.preview.clear();
-        self.readme.clear();
         self.picker_open = false;
         self.auto_select = false;
         self.auto_searched = true;
@@ -276,7 +373,7 @@ impl Downloads {
     }
 
     fn close_profile(&mut self) {
-        if let Some((results, sections, _)) = self.feed_backup.take() {
+        if let Some((results, sections)) = self.feed_backup.take() {
             self.results = results;
             self.sections = sections;
         }
@@ -377,126 +474,7 @@ impl Downloads {
         let lines = runner.drain();
         let finished = runner.poll_exit().is_some();
         for line in lines {
-            let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                self.log.push_back(line);
-                continue;
-            };
-            match v.get("type").and_then(|x| x.as_str()).unwrap_or("") {
-                "profile" => {
-                    self.profile_count = v.get("count").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                    if let Some(a) = v.get("author").and_then(|x| x.as_str()) {
-                        self.profile_author = Some(a.to_string());
-                    }
-                }
-                "section" => {
-                    self.sections.push(Section {
-                        title: v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        note: v.get("note").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        start: self.results.len(),
-                    });
-                }
-                "item" => {
-                    self.results.push(Item {
-                        id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        downloads: v.get("downloads").and_then(|x| x.as_u64()).unwrap_or(0),
-                        likes: v.get("likes").and_then(|x| x.as_u64()).unwrap_or(0),
-                        tags: v
-                            .get("tags")
-                            .and_then(|x| x.as_array())
-                            .map(|a| a.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
-                            .unwrap_or_default(),
-                        author: v.get("author").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        updated: v.get("updated").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        created: v.get("created").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        is_new: v.get("new").and_then(|x| x.as_bool()).unwrap_or(false),
-                        library: v.get("library").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        quant: v.get("quant").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                        file_size: v.get("file_size").and_then(|x| x.as_u64()).unwrap_or(0),
-                        verified: v.get("verified").and_then(|x| x.as_bool()).unwrap_or(false),
-                    });
-                }
-                "files" => {
-                    if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
-                        self.files = items
-                            .iter()
-                            .map(|f| {
-                                (
-                                    f.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                                    f.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
-                                )
-                            })
-                            .collect();
-                        self.variants = v
-                            .get("variants")
-                            .and_then(|x| x.as_array())
-                            .map(|a| {
-                                a.iter()
-                                    .map(|v| Variant {
-                                        label: v
-                                            .get("label")
-                                            .and_then(|x| x.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        size: v.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        self.file_sel = if !self.variants.is_empty() {
-                            Some(self.default_variant())
-                        } else if !self.files.is_empty() {
-                            Some(0)
-                        } else {
-                            None
-                        };
-                        self.status = if self.variants.is_empty() {
-                            crate::tf!("Файлов: {}", "Files: {}", self.files.len())
-                        } else {
-                            crate::tf!("Квантов: {}", "Quants: {}", self.variants.len())
-                        };
-                    }
-                }
-                "progress" => {
-                    let done = v.get("done").and_then(|x| x.as_u64()).unwrap_or(0);
-                    let total = v.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
-                    let file = v.get("file").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    self.progress = Some((done, total, file));
-                }
-                "readme" => {
-                    if let Some(text) = v.get("text").and_then(|x| x.as_str()) {
-                        self.readme = text
-                            .lines()
-                            .map(|l| l.to_string())
-                            .filter(|l| !l.trim_start().starts_with("---"))
-                            .collect();
-                    }
-                }
-                "preview" => {
-                    if let Some(rows) = v.get("rows").and_then(|x| x.as_array()) {
-                        let file = v.get("file").and_then(|x| x.as_str()).unwrap_or("");
-                        self.preview.push(crate::tf!("файл: {file}", "file: {file}"));
-                        for row in rows.iter().take(3) {
-                            let short = serde_json::to_string_pretty(row).unwrap_or_default();
-                            self.preview.push(short.chars().take(600).collect());
-                        }
-                    }
-                }
-                "done" => {
-                    self.status = match action {
-                        Action::Search => crate::tf!("Найдено: {}", "Found: {}", self.results.len()),
-                        Action::Feed => crate::tf!("В ленте: {}", "In feed: {}", self.results.len()),
-                        Action::Profile => crate::tf!("Моделей: {}", "Models: {}", self.results.len()),
-                        Action::Files => crate::tf!("Файлов: {}", "Files: {}", self.files.len()),
-                        Action::Download => tr("Скачано").into(),
-                        Action::Preview => tr("Готово").into(),
-                        Action::Readme => tr("README загружен").into(),
-                    };
-                }
-                "error" => {
-                    self.status = v.get("message").and_then(|x| x.as_str()).unwrap_or(tr("ошибка")).to_string();
-                }
-                _ => {}
-            }
+            self.handle_event(&line, action);
         }
         if finished {
             self.proc = None;
@@ -507,37 +485,143 @@ impl Downloads {
         }
     }
 
+    /// Разбор одной строки hf_tools.py. Не-JSON уходит в журнал,
+    /// JSON неизвестного вида молча пропускается (как раньше).
+    fn handle_event(&mut self, line: &str, action: Action) {
+        let event = match serde_json::from_str::<HubEvent>(line) {
+            Ok(event) => event,
+            Err(_) => {
+                if serde_json::from_str::<Value>(line).is_err() {
+                    self.log.push_back(line.to_string());
+                }
+                return;
+            }
+        };
+        match event {
+            HubEvent::Profile { count, author } => {
+                self.profile_count = count;
+                if let Some(a) = author {
+                    self.profile_author = Some(a);
+                }
+            }
+            HubEvent::Section { title, note } => {
+                self.sections.push(Section {
+                    title,
+                    note,
+                    start: self.results.len(),
+                });
+            }
+            HubEvent::Item(p) => {
+                self.results.push(Item {
+                    id: p.id,
+                    downloads: p.downloads,
+                    likes: p.likes,
+                    tags: p.tags,
+                    author: p.author,
+                    updated: p.updated,
+                    created: p.created,
+                    is_new: p.is_new,
+                    library: p.library,
+                    quant: p.quant,
+                    file_size: p.file_size,
+                    verified: p.verified,
+                });
+            }
+            HubEvent::Files { items, variants } => {
+                if let Some(items) = items {
+                    self.files = items.into_iter().map(|f| (f.name, f.size)).collect();
+                    self.variants = variants
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|v| Variant {
+                            label: v.label,
+                            size: v.size,
+                        })
+                        .collect();
+                    self.file_sel = if !self.variants.is_empty() {
+                        Some(self.default_variant())
+                    } else if !self.files.is_empty() {
+                        Some(0)
+                    } else {
+                        None
+                    };
+                    self.status = if self.variants.is_empty() {
+                        crate::tf!("Файлов: {}", "Files: {}", self.files.len())
+                    } else {
+                        crate::tf!("Квантов: {}", "Quants: {}", self.variants.len())
+                    };
+                }
+            }
+            HubEvent::Progress { done, total, file } => {
+                self.progress = Some((done, total, file));
+            }
+            HubEvent::Readme { text } => {
+                if let Some(text) = text {
+                    self.readme = text
+                        .lines()
+                        .map(|l| l.to_string())
+                        .filter(|l| !l.trim_start().starts_with("---"))
+                        .collect();
+                }
+            }
+            HubEvent::Preview { rows, file } => {
+                if let Some(rows) = rows {
+                    self.preview.push(crate::tf!("файл: {file}", "file: {file}"));
+                    for row in rows.iter().take(3) {
+                        let short = serde_json::to_string_pretty(row).unwrap_or_default();
+                        self.preview.push(short.chars().take(600).collect());
+                    }
+                }
+            }
+            HubEvent::Done => {
+                self.status = match action {
+                    Action::Search => crate::tf!("Найдено: {}", "Found: {}", self.results.len()),
+                    Action::Feed => crate::tf!("В ленте: {}", "In feed: {}", self.results.len()),
+                    Action::Profile => crate::tf!("Моделей: {}", "Models: {}", self.results.len()),
+                    Action::Files => crate::tf!("Файлов: {}", "Files: {}", self.files.len()),
+                    Action::Download => tr("Скачано").into(),
+                    Action::Preview => tr("Готово").into(),
+                    Action::Readme => tr("README загружен").into(),
+                };
+            }
+            HubEvent::Error { message } => {
+                self.status = message.unwrap_or_else(|| tr("ошибка").to_string());
+            }
+            HubEvent::Unknown => {}
+        }
+    }
+
 
     /// Синяя галочка рядом с ником (как на Hugging Face).
     fn verified_badge(painter: &egui::Painter, center: egui::Pos2) {
         const BLUE: egui::Color32 = egui::Color32::from_rgb(0x2F, 0x80, 0xED);
-    painter.circle_filled(center, 5.5, BLUE);
-    let s = egui::Stroke::new(1.3_f32, egui::Color32::WHITE);
-    painter.line_segment(
-        [
-            egui::pos2(center.x - 2.5, center.y),
-            egui::pos2(center.x - 0.5, center.y + 2.0),
-        ],
-        s,
-    );
-    painter.line_segment(
-        [
-            egui::pos2(center.x - 0.5, center.y + 2.0),
-            egui::pos2(center.x + 2.8, center.y - 2.2),
-        ],
-        s,
-    );
-}
-
-fn short_num(v: u64) -> String {
-    if v >= 1_000_000 {
-        format!("{:.1}M", v as f64 / 1e6)
-    } else if v >= 1_000 {
-        format!("{:.1}K", v as f64 / 1e3)
-    } else {
-        v.to_string()
+        painter.circle_filled(center, 5.5, BLUE);
+        let s = egui::Stroke::new(1.3_f32, egui::Color32::WHITE);
+        painter.line_segment(
+            [
+                egui::pos2(center.x - 2.5, center.y),
+                egui::pos2(center.x - 0.5, center.y + 2.0),
+            ],
+            s,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(center.x - 0.5, center.y + 2.0),
+                egui::pos2(center.x + 2.8, center.y - 2.2),
+            ],
+            s,
+        );
     }
-}
+
+    fn short_num(v: u64) -> String {
+        if v >= 1_000_000 {
+            format!("{:.1}M", v as f64 / 1e6)
+        } else if v >= 1_000 {
+            format!("{:.1}K", v as f64 / 1e3)
+        } else {
+            v.to_string()
+        }
+    }
 
     fn tile_color(name: &str) -> egui::Color32 {
         let sum: u32 = name.bytes().map(|b| b as u32).sum();

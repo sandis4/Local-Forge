@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 use eframe::egui::{self, RichText, Rounding, ScrollArea};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::models;
@@ -155,99 +156,204 @@ fn split_shard(name: &str) -> Option<(String, u32, u32)> {
     Some((base.to_string(), part, total))
 }
 
-fn scan_workspace(ws: &Path) -> (Vec<ModelEntry>, Vec<String>) {
-        let mut models: Vec<ModelEntry> = Vec::new();
-        if let Ok(dirs) = std::fs::read_dir(ws.join("models")) {
-            for d in dirs.flatten() {
-                let p = d.path();
-                if p.join("config.json").exists() {
-                    let name = d.file_name().to_string_lossy().to_string();
-                    models.push(ModelEntry {
-                        path: format!("models/{name}"),
-                        size_mb: dir_size_mb(&p),
-                        total: None,
-                        active: active_hint(&name),
-                    });
-                }
-            }
-        }
-        if let Ok(files) = std::fs::read_dir(ws.join("models_gguf")) {
-            // GGUF может быть разбит на шарды: list-*.gguf показывает только
-            // первый, llama.cpp сам подхватит остальные из той же папки.
-            let mut splits: HashMap<String, (String, String, f64, u32, u32)> = HashMap::new();
-            for f in files.flatten() {
-                let p = f.path();
-                if !p.extension().map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
-                    continue;
-                }
-                let name = f.file_name().to_string_lossy().to_string();
-                let size = f.metadata().map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
-                if let Some((base, part, total)) = split_shard(&name) {
-                    let e = splits.entry(base).or_insert_with(|| (String::new(), String::new(), 0.0, 0, total));
-                    e.2 += size;
-                    e.3 = e.3.max(part);
-                    e.4 = e.4.max(total);
-                    if part == 1 {
-                        e.0 = format!("models_gguf/{name}");
-                        e.1 = name.clone();
-                    }
-                } else {
-                    models.push(ModelEntry {
-                        path: format!("models_gguf/{name}"),
-                        size_mb: size,
-                        total: None,
-                        active: active_hint(&name),
-                    });
-                }
-            }
-            for (_, (path, name, size, _seen, _total)) in splits {
-                if path.is_empty() {
-                    continue;
-                }
+fn rank(m: &ModelEntry) -> u8 {
+    let u = m.path.to_uppercase();
+    if !u.ends_with(".GGUF") {
+        5
+    } else if u.contains("Q4") {
+        0
+    } else if u.contains("Q5") || u.contains("Q6") {
+        1
+    } else if u.contains("Q8") {
+        2
+    } else if u.contains("Q2") || u.contains("Q3") {
+        3
+    } else {
+        4
+    }
+}
+
+/// HF-модели из `models/` + GGUF из `models_gguf/`, отсортированные (rank, path).
+fn scan_models(ws: &Path) -> Vec<ModelEntry> {
+    let mut models: Vec<ModelEntry> = Vec::new();
+    if let Ok(dirs) = std::fs::read_dir(ws.join("models")) {
+        for d in dirs.flatten() {
+            let p = d.path();
+            if p.join("config.json").exists() {
+                let name = d.file_name().to_string_lossy().to_string();
                 models.push(ModelEntry {
-                    path,
-                    size_mb: size,
+                    path: format!("models/{name}"),
+                    size_mb: dir_size_mb(&p),
                     total: None,
                     active: active_hint(&name),
                 });
             }
         }
-        fn rank(m: &ModelEntry) -> u8 {
-            let u = m.path.to_uppercase();
-            if !u.ends_with(".GGUF") {
-                5
-            } else if u.contains("Q4") {
-                0
-            } else if u.contains("Q5") || u.contains("Q6") {
-                1
-            } else if u.contains("Q8") {
-                2
-            } else if u.contains("Q2") || u.contains("Q3") {
-                3
-            } else {
-                4
-            }
-        }
-        models.sort_by_key(|m| (rank(m), m.path.clone()));
+    }
+    models.extend(scan_splits(ws));
+    models.sort_by_key(|m| (rank(m), m.path.clone()));
+    models
+}
 
-        let mut adapters = vec![String::new()];
-        if let Ok(dirs) = std::fs::read_dir(ws) {
-            for d in dirs.flatten() {
-                let p = d.path();
-                let name = d.file_name().to_string_lossy().to_string();
-                if !p.is_dir() || !name.starts_with("output") {
-                    continue;
-                }
-                if let Ok(subs) = std::fs::read_dir(&p) {
-                    for s in subs.flatten() {
-                        if s.path().join("adapter_config.json").exists() {
-                            adapters.push(format!("{}/{}", name, s.file_name().to_string_lossy()));
-                        }
+/// GGUF может быть разбит на шарды: list-*.gguf показывает только первый,
+/// llama.cpp сам подхватит остальные из той же папки.
+fn scan_splits(ws: &Path) -> Vec<ModelEntry> {
+    let mut models = Vec::new();
+    let Ok(files) = std::fs::read_dir(ws.join("models_gguf")) else {
+        return models;
+    };
+    let mut splits: HashMap<String, (String, String, f64, u32, u32)> = HashMap::new();
+    for f in files.flatten() {
+        let p = f.path();
+        if !p.extension().map(|e| e.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
+            continue;
+        }
+        let name = f.file_name().to_string_lossy().to_string();
+        let size = f.metadata().map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
+        if let Some((base, part, total)) = split_shard(&name) {
+            let e = splits.entry(base).or_insert_with(|| (String::new(), String::new(), 0.0, 0, total));
+            e.2 += size;
+            e.3 = e.3.max(part);
+            e.4 = e.4.max(total);
+            if part == 1 {
+                e.0 = format!("models_gguf/{name}");
+                e.1 = name.clone();
+            }
+        } else {
+            models.push(ModelEntry {
+                path: format!("models_gguf/{name}"),
+                size_mb: size,
+                total: None,
+                active: active_hint(&name),
+            });
+        }
+    }
+    for (_, (path, name, size, _seen, _total)) in splits {
+        if path.is_empty() {
+            continue;
+        }
+        models.push(ModelEntry {
+            path,
+            size_mb: size,
+            total: None,
+            active: active_hint(&name),
+        });
+    }
+    models
+}
+
+/// Папки `output*/` с `adapter_config.json`; первый элемент — «без адаптера».
+fn scan_adapters(ws: &Path) -> Vec<String> {
+    let mut adapters = vec![String::new()];
+    if let Ok(dirs) = std::fs::read_dir(ws) {
+        for d in dirs.flatten() {
+            let p = d.path();
+            let name = d.file_name().to_string_lossy().to_string();
+            if !p.is_dir() || !name.starts_with("output") {
+                continue;
+            }
+            if let Ok(subs) = std::fs::read_dir(&p) {
+                for s in subs.flatten() {
+                    if s.path().join("adapter_config.json").exists() {
+                        adapters.push(format!("{}/{}", name, s.file_name().to_string_lossy()));
                     }
                 }
             }
         }
-        (models, adapters)
+    }
+    adapters
+}
+
+fn scan_workspace(ws: &Path) -> (Vec<ModelEntry>, Vec<String>) {
+    (scan_models(ws), scan_adapters(ws))
+}
+
+/// События chat_engine.py: `{"ev": "...", ...}`.
+#[derive(Deserialize)]
+#[serde(tag = "ev")]
+enum ChatEvent {
+    #[serde(rename = "loading")]
+    Loading {
+        #[serde(default)]
+        message: String,
+    },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[serde(default)]
+        step: u64,
+    },
+    #[serde(rename = "heartbeat")]
+    Heartbeat,
+    #[serde(rename = "tool")]
+    Tool {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        args: Value,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        #[serde(default)]
+        ok: bool,
+        #[serde(default)]
+        text: String,
+    },
+    #[serde(rename = "reasoning")]
+    Reasoning {
+        #[serde(default)]
+        text: Option<String>,
+    },
+    #[serde(rename = "assistant")]
+    Assistant {
+        #[serde(default)]
+        text: String,
+    },
+    #[serde(rename = "agent_done")]
+    AgentDone,
+    #[serde(rename = "web")]
+    Web {
+        #[serde(default)]
+        engine: String,
+        #[serde(default)]
+        found: u64,
+        #[serde(default)]
+        note: String,
+    },
+    #[serde(rename = "ready")]
+    Ready {
+        #[serde(default)]
+        backend: String,
+        #[serde(default)]
+        info: String,
+    },
+    #[serde(rename = "api")]
+    Api {
+        #[serde(default)]
+        running: bool,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        note: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    #[serde(rename = "token")]
+    Token {
+        #[serde(default)]
+        text: Option<String>,
+    },
+    #[serde(rename = "done")]
+    Done {
+        #[serde(default)]
+        tok_s: Option<f64>,
+    },
+    #[serde(rename = "error")]
+    Error {
+        #[serde(default)]
+        message: Option<String>,
+    },
 }
 
 impl Chat {
@@ -529,121 +635,114 @@ impl Chat {
             None => return,
         };
         for line in lines {
-            let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                self.log.push_back(line);
-                continue;
-            };
-            match v.get("ev").and_then(|x| x.as_str()).unwrap_or("") {
-                "loading" => {
-                    self.loading_msg = v.get("message").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                }
-                "thinking" => {
-                    let step = v.get("step").and_then(|x| x.as_u64()).unwrap_or(0);
-                    self.agent_meta = crate::tf!("шаг {step}: генерирую аргументы…", "step {step}: generating arguments…");
-                }
-                "heartbeat" => {
-                    self.agent_meta = tr("генерирую… долгая запись — это нормально").into();
-                }
-                "tool" => {
-                    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                    let args = v.get("args").cloned().unwrap_or(Value::Null).to_string();
-                    let line = format!("→ {name} {args}");
-                    self.agent_steps.push(("tool".into(), line.clone()));
-                    Self::push_step_msg(&mut self.messages, line);
-                }
-                "tool_result" => {
-                    let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-                    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
-                    let line = format!("← {} {text}", if ok { "ok" } else { tr("ошибка") });
-                    self.agent_steps.push(("result".into(), line.clone()));
-                    Self::push_step_msg(&mut self.messages, line);
-                }
-                "reasoning" => {
-                    // Показываем размышления только в режиме Think.
-                    if self.think {
-                        if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
-                            self.reasoning.push_str(t);
-                            match self.messages.last_mut() {
-                                Some(m) if m.role == "reasoning" => m.content.push_str(t),
-                                _ => self.messages.push(Msg {
-                                    role: "reasoning".into(),
-                                    content: t.to_string(),
-                                }),
-                            }
+            self.handle_event(&line);
+        }
+    }
+
+    /// Разбор одной строки chat_engine.py. Не-JSON и неизвестные события — в журнал.
+    fn handle_event(&mut self, line: &str) {
+        let event = match serde_json::from_str::<ChatEvent>(line) {
+            Ok(event) => event,
+            Err(_) => {
+                self.log.push_back(line.to_string());
+                return;
+            }
+        };
+        match event {
+            ChatEvent::Loading { message } => {
+                self.loading_msg = message;
+            }
+            ChatEvent::Thinking { step } => {
+                self.agent_meta = crate::tf!("шаг {step}: генерирую аргументы…", "step {step}: generating arguments…");
+            }
+            ChatEvent::Heartbeat => {
+                self.agent_meta = tr("генерирую… долгая запись — это нормально").into();
+            }
+            ChatEvent::Tool { name, args } => {
+                let line = format!("→ {name} {}", args);
+                self.agent_steps.push(("tool".into(), line.clone()));
+                Self::push_step_msg(&mut self.messages, line);
+            }
+            ChatEvent::ToolResult { ok, text } => {
+                let line = format!("← {} {text}", if ok { "ok" } else { tr("ошибка") });
+                self.agent_steps.push(("result".into(), line.clone()));
+                Self::push_step_msg(&mut self.messages, line);
+            }
+            ChatEvent::Reasoning { text } => {
+                // Показываем размышления только в режиме Think.
+                if self.think {
+                    if let Some(t) = text {
+                        self.reasoning.push_str(&t);
+                        match self.messages.last_mut() {
+                            Some(m) if m.role == "reasoning" => m.content.push_str(&t),
+                            _ => self.messages.push(Msg {
+                                role: "reasoning".into(),
+                                content: t,
+                            }),
                         }
                     }
                 }
-                "assistant" => {
-                    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    self.agent_answer = text.clone();
-                    self.messages.push(Msg { role: "assistant".into(), content: text });
+            }
+            ChatEvent::Assistant { text } => {
+                self.agent_answer = text.clone();
+                self.messages.push(Msg { role: "assistant".into(), content: text });
+            }
+            ChatEvent::AgentDone => {
+                self.agent_running = false;
+                self.agent_meta = tr("готово").into();
+            }
+            ChatEvent::Web { engine, found, note } => {
+                if found == 0 {
+                    self.web_note = crate::tf!("Ищу в {engine}…", "Searching {engine}…");
+                } else {
+                    self.web_note = crate::tf!("{engine}: {found} источников", "{engine}: {found} sources");
                 }
-                "agent_done" => {
+                if !note.is_empty() && found > 0 {
+                    self.web_note = crate::tf!("{engine}: {found} источников · {note}", "{engine}: {found} sources · {note}");
+                }
+            }
+            ChatEvent::Ready { backend, info } => {
+                self.status = Status::Ready;
+                self.backend = backend;
+                self.info = info;
+                self.loading_msg.clear();
+            }
+            ChatEvent::Api { running, url, key, note, error } => {
+                self.api_running = running;
+                self.api_url = url;
+                if let Some(k) = key {
+                    self.api_key = k;
+                }
+                self.api_note = note;
+                if let Some(e) = error {
+                    if !e.is_empty() {
+                        self.api_note = format!("{e}");
+                    }
+                }
+            }
+            ChatEvent::Token { text } => {
+                if let Some(t) = text {
+                    if let Some(last) = self.messages.last_mut() {
+                        last.content.push_str(&t);
+                    }
+                }
+            }
+            ChatEvent::Done { tok_s } => {
+                self.status = Status::Ready;
+                self.tok_s = tok_s;
+            }
+            ChatEvent::Error { message } => {
+                let message = message.unwrap_or_else(|| tr("ошибка").to_string());
+                if self.agent_running {
                     self.agent_running = false;
-                    self.agent_meta = tr("готово").into();
+                    self.agent_meta = message.clone();
                 }
-                "web" => {
-                    let engine = v.get("engine").and_then(|x| x.as_str()).unwrap_or("");
-                    let found = v.get("found").and_then(|x| x.as_u64()).unwrap_or(0);
-                    let note = v.get("note").and_then(|x| x.as_str()).unwrap_or("");
-                    if found == 0 {
-                        self.web_note = crate::tf!("Ищу в {engine}…", "Searching {engine}…");
-                    } else {
-                        self.web_note = crate::tf!("{engine}: {found} источников", "{engine}: {found} sources");
-                    }
-                    if !note.is_empty() && found > 0 {
-                        self.web_note = crate::tf!("{engine}: {found} источников · {note}", "{engine}: {found} sources · {note}");
-                    }
-                }
-                "ready" => {
+                self.error = Some(message);
+                if self.status == Status::Generating {
                     self.status = Status::Ready;
-                    self.backend = v.get("backend").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    self.info = v.get("info").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    self.loading_msg.clear();
+                } else {
+                    self.status = Status::Failed;
                 }
-                "api" => {
-                    self.api_running = v.get("running").and_then(|x| x.as_bool()).unwrap_or(false);
-                    self.api_url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    if let Some(k) = v.get("key").and_then(|x| x.as_str()) {
-                        self.api_key = k.to_string();
-                    }
-                    self.api_note = v.get("note").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    if let Some(e) = v.get("error").and_then(|x| x.as_str()) {
-                        if !e.is_empty() {
-                            self.api_note = format!("{e}");
-                        }
-                    }
-                }
-                "token" => {
-                    if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
-                        if let Some(last) = self.messages.last_mut() {
-                            last.content.push_str(t);
-                        }
-                    }
-                }
-                "done" => {
-                    self.status = Status::Ready;
-                    self.tok_s = v.get("tok_s").and_then(|x| x.as_f64());
-                }
-                "error" => {
-                    if self.agent_running {
-                        self.agent_running = false;
-                        self.agent_meta = v
-                            .get("message")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or(tr("ошибка"))
-                            .to_string();
-                    }
-                    self.error = Some(
-                        v.get("message").and_then(|x| x.as_str()).unwrap_or(tr("ошибка")).to_string(),
-                    );
-                    if self.status == Status::Generating {
-                        self.status = Status::Ready;
-                    } else {
-                        self.status = Status::Failed;
-                    }
-                }
-                _ => self.log.push_back(line),
             }
         }
     }
@@ -1331,15 +1430,15 @@ mod tests {
         chat.max_tokens = "8".into();
         chat.load("python", engine, ws);
         if !wait_for(&mut chat, Status::Ready, 240) {
-            crate::tf!("STDERR движка: {:?}", "Engine STDERR: {:?}", chat.log.iter().collect::<Vec<_>>());
-            panic!(tr("модель не загрузилась: {:?}"), chat.error);
+            eprintln!("{}", crate::tf!("STDERR движка: {:?}", "Engine STDERR: {:?}", chat.log.iter().collect::<Vec<_>>()));
+            panic!("{} {:?}", tr("модель не загрузилась:"), chat.error);
         }
         chat.input = "Say hi".into();
         chat.ask();
-        assert!(wait_for(&mut chat, Status::Ready, 120), tr("нет ответа: {:?}"), chat.error);
+        assert!(wait_for(&mut chat, Status::Ready, 120), "{} {:?}", tr("нет ответа:"), chat.error);
         let answer = chat.messages.last().map(|m| m.content.clone()).unwrap_or_default();
-        assert!(!answer.trim().is_empty(), tr("пустой ответ"));
-        eprintln!(tr("ответ: {answer}"));
+        assert!(!answer.trim().is_empty(), "{}", tr("пустой ответ"));
+        eprintln!("{} {}", tr("ответ:"), answer);
     }
 
     #[test]

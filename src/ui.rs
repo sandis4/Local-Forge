@@ -49,23 +49,21 @@ impl App {
             self.stats.begin();
         }
         if !was_step {
-            self.log.push_back(line);
-            while self.log.len() > LOG_LIMIT {
-                self.log.pop_front();
-            }
+            self.push_capped(line);
         }
     }
 
     pub fn push_log(&mut self, line: impl Into<String>) {
-        self.log.push_back(line.into());
+        self.push_capped(line.into());
+    }
+
+    /// Журнал ограничен LOG_LIMIT строк: старые вытесняются.
+    fn push_capped(&mut self, line: String) {
+        self.log.push_back(line);
         while self.log.len() > LOG_LIMIT {
             self.log.pop_front();
         }
     }
-}
-
-fn one_line<'a>(parts: Vec<Span<'a>>) -> Line<'a> {
-    Line::from(parts)
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -86,7 +84,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let padding = s.padding.clone().unwrap_or_else(|| tr("динамический").into());
 
     f.render_widget(
-        Paragraph::new(one_line(vec![
+        Paragraph::new(Line::from(vec![
             Span::styled(tr("модель: "), Style::default().fg(Color::DarkGray)),
             Span::raw(model),
             Span::styled(tr("   профиль: "), Style::default().fg(Color::DarkGray)),
@@ -118,7 +116,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         _ => "—".into(),
     };
     f.render_widget(
-        Paragraph::new(one_line(vec![
+        Paragraph::new(Line::from(vec![
             Span::styled("loss ", Style::default().fg(Color::DarkGray)),
             Span::styled(loss, Style::default().fg(Color::Yellow)),
             Span::styled("   lr ", Style::default().fg(Color::DarkGray)),
@@ -151,7 +149,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::Green)
     };
     f.render_widget(
-        Paragraph::new(one_line(vec![
+        Paragraph::new(Line::from(vec![
             Span::styled(status, status_style),
             Span::styled(tr("   осталось "), Style::default().fg(Color::DarkGray)),
             Span::raw(eta),
@@ -344,8 +342,8 @@ mod tests {
     #[test]
     fn renders_status_fields() {
         let mut app = App::new();
-        app.push_line(tr("[Шаг 42] Loss: 0.8342 | LR: 1.23e-05 | RAM процесса: 2345MB | Потоков: 8 | Профиль: work").to_string());
-        app.push_log(tr("[Шедулер] -> шагов ~100, warmup 5."));
+        app.push_line("[Шаг 42] Loss: 0.8342 | LR: 1.23e-05 | RAM процесса: 2345MB | Потоков: 8 | Профиль: work".to_string());
+        app.push_log("[Шедулер] -> шагов ~100, warmup 5.");
         app.stats.total_steps = Some(100);
         app.stats.model = Some("models/gemma_base".into());
         let screen = render(&app, 110, 18);

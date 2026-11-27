@@ -7,7 +7,7 @@ import sys
 import os
 
 from config import TrainingConfig, SPEED_PRESETS, DEFAULT_MODEL_PATH
-from trainer import CPUTrainer
+from trainer import CPUTrainer, banner
 
 def main():
     parser = argparse.ArgumentParser(
@@ -126,7 +126,7 @@ def main():
         from hardware import detect_hardware, describe_hardware
         from memory_plan import plan_for_model, describe_plan
         hw = detect_hardware()
-        print("=" * 60)
+        banner()
         print(" ЖЕЛЕЗО:")
         print(describe_hardware(hw))
         plan = plan_for_model(args.model, hw, user={})
@@ -134,7 +134,7 @@ def main():
         print(describe_plan(plan))
         for w in plan.get("warnings", []):
             print(f"  [!] {w}")
-        print("=" * 60)
+        banner()
         auto_fields = {
             "--max_length": ("max_length", plan["max_length"]),
             "--lora_r": ("lora_r", plan["lora_r"]),
@@ -168,55 +168,46 @@ def main():
     else:
         config.auto = False
 
-    # Явные переопределения поверх автоплана
-    if args.lisa_layers is not None:
-        config.lisa_layers = args.lisa_layers
-    if args.lisa_interval is not None:
-        config.lisa_interval = args.lisa_interval
-    if args.optimizer is not None:
-        config.optimizer = args.optimizer
-    if args.offload_dir is not None:
-        config.offload_dir = args.offload_dir
+    # Явные переопределения поверх автоплана: CLI всегда важнее плана.
+    simple_overrides = [
+        (args.lisa_layers, "lisa_layers"),
+        (args.lisa_interval, "lisa_interval"),
+        (args.optimizer, "optimizer"),
+        (args.offload_dir, "offload_dir"),
+        (args.tune_mode, "tune_mode"),
+        (args.galore_rank, "galore_rank"),
+        (args.galore_gap, "galore_gap"),
+        (args.galore_scale, "galore_scale"),
+        (args.objective, "objective"),
+        (args.orpo_file, "orpo_file"),
+        (args.orpo_beta, "orpo_beta"),
+        (args.resume_state, "resume_state"),
+        (args.resume_step, "resume_step"),
+        (args.lora_plus_ratio, "lora_plus_ratio"),
+        (args.attn, "attn"),
+        (args.length_window, "length_window"),
+    ]
+    for value, attr in simple_overrides:
+        if value is not None:
+            setattr(config, attr, value)
     if "--no_amp" in explicit:
         config.amp = False
     elif "--amp" in explicit:
         config.amp = True
     if "--amp_dtype" in explicit:
         config.amp_dtype = args.amp_dtype
-    if args.tune_mode is not None:
-        config.tune_mode = args.tune_mode
-    if args.galore_rank is not None:
-        config.galore_rank = args.galore_rank
-    if args.galore_gap is not None:
-        config.galore_gap = args.galore_gap
-    if args.galore_scale is not None:
-        config.galore_scale = args.galore_scale
-    if args.objective is not None:
-        config.objective = args.objective
-    if args.orpo_file is not None:
-        config.orpo_file = args.orpo_file
-    if args.orpo_beta is not None:
-        config.orpo_beta = args.orpo_beta
     if args.heretic_trials is not None:
         config.heretic_trials = max(1, args.heretic_trials)
     if args.heretic_startup_trials is not None:
         config.heretic_startup_trials = max(0, args.heretic_startup_trials)
     if args.heretic_quant is not None:
         config.heretic_quant = args.heretic_quant
-    if args.resume_state is not None:
-        config.resume_state = args.resume_state
     if args.state_save is not None:
         config.state_save = bool(args.state_save)
-    if args.resume_step is not None:
-        config.resume_step = args.resume_step
     if args.cache_dir is not None:
         config.cache_dir = None if args.cache_dir == "off" else args.cache_dir
-    if getattr(args, "compile") is not None:
-        config.compile = bool(getattr(args, "compile"))
-    if args.lora_plus_ratio is not None:
-        config.lora_plus_ratio = args.lora_plus_ratio
-    if args.attn is not None:
-        config.attn = args.attn
+    if args.compile is not None:
+        config.compile = bool(args.compile)
     if args.liger is not None:
         config.liger = bool(args.liger)
     if args.quant4 is not None:
@@ -225,8 +216,6 @@ def main():
         config.packing = True
     if args.group_by_length:
         config.group_by_length = True
-    if args.length_window is not None:
-        config.length_window = args.length_window
     if args.kd:
         config.kd = True
         config.kd_weight = max(0.0, min(2.0, args.kd_weight))
@@ -267,14 +256,16 @@ def main():
     # Старый дефолт всегда смотрел в output_model — из-за этого раны с кастомным
     # --output_dir (например output_forge1) молча стартовали с нуля.
     if args.resume is not None:
-        resume_path = args.resume if os.path.exists(args.resume) else None
-        if args.resume is not None and resume_path is None:
+        if os.path.exists(args.resume):
+            resume_path = args.resume
+        else:
+            resume_path = None
             print(f"[Resume] Папка '{args.resume}' не найдена — старт с нуля.")
     else:
         auto_resume = os.path.join(config.output_dir, "interactive_checkpoint")
         resume_path = auto_resume if os.path.exists(auto_resume) else None
 
-    print("=" * 60)
+    banner()
     print(" ЗАПУСК ОБУЧЕНИЯ НА CPU (LITTLE FORGE 1)")
     print(f" Модель: {config.model_name_or_path}")
     print(f" Профиль скорости: {args.preset} -> {SPEED_PRESETS[args.preset]['name']}")
@@ -303,7 +294,7 @@ def main():
         print(f" Режим: Продолжение дообучения из '{resume_path}'")
     else:
         print(" Режим: Обучение с чистого листа")
-    print("=" * 60)
+    banner()
 
     trainer = CPUTrainer(config, resume_checkpoint=resume_path)
     trainer.train()

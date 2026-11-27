@@ -25,6 +25,15 @@ enum Tab {
     Settings,
 }
 
+fn tab_label(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Chat => tr("Чат"),
+        Tab::Train => tr("Обучение"),
+        Tab::Download => tr("Хаб моделей"),
+        Tab::Settings => tr("Настройки"),
+    }
+}
+
 
 #[derive(PartialEq, Clone, Copy)]
 enum Phase {
@@ -203,60 +212,63 @@ impl Form {
     }
 
     fn launch(&self, base: &Launch) -> Launch {
+        // Общие поля берём из settings() — единый источник значений формы.
+        // Поля «авто» (пусто/None) остаются None: тренер сам выберет значение.
+        let s = self.settings();
         let mut l = base.clone();
-        l.model = self.model.trim().to_string();
-        l.data = self.train_file.trim().to_string();
-        l.val_file = self.val_file.trim().to_string();
-        l.identity_file = self.identity_file.trim().to_string();
-        l.out = self.out.trim().to_string();
-        l.preset = self.preset.clone();
-        l.epochs = num_or(&self.epochs, 1);
-        l.lr = num_or(&self.lr, 2e-5);
-        l.max_grad_norm = num_or(&self.max_grad_norm, 1.0);
-        l.warmup_ratio = num_or(&self.warmup_ratio, 0.05);
+        l.model = s.model;
+        l.data = s.train_file;
+        l.val_file = s.val_file;
+        l.identity_file = s.identity_file;
+        l.out = s.out;
+        l.preset = s.preset;
+        l.epochs = s.epochs;
+        l.lr = s.lr;
+        l.max_grad_norm = s.max_grad_norm;
+        l.warmup_ratio = s.warmup_ratio;
         l.save_steps = opt_num(&self.save_steps);
-        l.max_samples = opt_num(&self.max_samples);
+        l.max_samples = s.max_samples;
         l.max_length = opt_num(&self.max_length);
         l.batch_size = opt_num(&self.batch_size);
         l.grad_accum = opt_num(&self.grad_accum);
         l.lora_r = opt_num(&self.lora_r);
         l.lora_alpha = opt_num(&self.lora_alpha);
-        l.lora_plus_ratio = num_or(&self.lora_plus_ratio, 0.0);
-        l.tune_mode = self.tune_mode.clone();
-        l.dtype = self.dtype.clone();
-        l.amp = self.amp;
-        l.amp_dtype = if self.amp_dtype == "auto" {
+        l.lora_plus_ratio = s.lora_plus_ratio;
+        l.tune_mode = s.tune_mode;
+        l.dtype = s.dtype;
+        l.amp = s.amp;
+        l.amp_dtype = if s.amp_dtype == "auto" {
             None
         } else {
-            Some(self.amp_dtype.clone())
+            Some(s.amp_dtype)
         };
-        l.grad_checkpointing = self.grad_checkpointing;
-        l.optimizer = if self.optimizer == "auto" {
+        l.grad_checkpointing = s.grad_checkpointing;
+        l.optimizer = if s.optimizer == "auto" {
             None
         } else {
-            Some(self.optimizer.clone())
+            Some(s.optimizer)
         };
         l.lisa_layers = opt_num(&self.lisa_layers);
         l.lisa_interval = opt_num(&self.lisa_interval);
-        l.quant4 = self.quant4.clone();
-        l.attn = self.attn.clone();
-        l.liger = self.liger;
-        l.compile = self.compile;
-        l.replay_file = self.replay_file.trim().to_string();
-        l.replay_ratio = num_or(&self.replay_ratio, 0.2);
-        l.kl_anchor = num_or(&self.kl_anchor, 0.0);
-        l.objective = self.objective.clone();
-        l.orpo_file = self.orpo_file.trim().to_string();
-        l.orpo_beta = num_or(&self.orpo_beta, 0.1);
+        l.quant4 = s.quant4;
+        l.attn = s.attn;
+        l.liger = s.liger;
+        l.compile = s.compile;
+        l.replay_file = s.replay_file;
+        l.replay_ratio = s.replay_ratio;
+        l.kl_anchor = s.kl_anchor;
+        l.objective = s.objective;
+        l.orpo_file = s.orpo_file;
+        l.orpo_beta = s.orpo_beta;
         l.heretic_trials = num_or(&self.heretic_trials, 3);
         l.heretic_startup_trials = num_or(&self.heretic_startup_trials, 1);
         l.heretic_quant = self.heretic_quant.clone();
-        l.group_by_length = self.group_by_length;
-        l.packing = self.packing;
-        l.kd = self.kd;
-        l.kd_weight = num_or(&self.kd_weight, 0.5);
-        l.kd_top_k = num_or(&self.kd_top_k, 8);
-        l.cache = self.cache;
+        l.group_by_length = s.group_by_length;
+        l.packing = s.packing;
+        l.kd = s.kd;
+        l.kd_weight = s.kd_weight;
+        l.kd_top_k = s.kd_top_k;
+        l.cache = s.cache;
         l.extra = self.extra.split_whitespace().map(|s| s.to_string()).collect();
         l
     }
@@ -267,7 +279,7 @@ pub struct GuiApp {
     base: Launch,
     form: Form,
     check: CheckState,
-    checked_sig: Option<String>,
+    checked_sig: Option<Settings>,
     plan_applied: bool,
     pending_start: bool,
     scroll_top: bool,
@@ -373,147 +385,91 @@ fn apply_flags(form: &mut Form, text: &str) -> (usize, usize, Vec<String>) {
                 Some(v.to_string())
             }
         };
-        match key.as_str() {
-            "model" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.model = x; applied += 1; }
-            }
-            "train_file" | "data" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.train_file = x; applied += 1; }
-            }
-            "val_file" | "val" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.val_file = x; applied += 1; }
-            }
-            "output_dir" | "out" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.out = x; applied += 1; }
-            }
-            "identity_file" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.identity_file = x; applied += 1; }
-            }
-            "epochs" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.epochs = x; applied += 1; }
-            }
-            "lr" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.lr = x; applied += 1; }
-            }
-            "max_grad_norm" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.max_grad_norm = x; applied += 1; }
-            }
-            "warmup_ratio" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.warmup_ratio = x; applied += 1; }
-            }
-            "max_length" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.max_length = x; applied += 1; }
-            }
-            "max_samples" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.max_samples = x; applied += 1; }
-            }
-            "batch_size" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.batch_size = x; applied += 1; }
-            }
-            "grad_accum" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.grad_accum = x; applied += 1; }
-            }
-            "save_steps" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.save_steps = x; applied += 1; }
-            }
-            "lora_r" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.lora_r = x; applied += 1; }
-            }
-            "lora_alpha" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.lora_alpha = x; applied += 1; }
-            }
-            "lora_plus_ratio" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.lora_plus_ratio = x; applied += 1; }
-            }
-            "tune_mode" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.tune_mode = x; applied += 1; }
-            }
-            "preset" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.preset = x; applied += 1; }
-            }
-            "dtype" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.dtype = x; applied += 1; }
-            }
-            "amp_dtype" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.amp_dtype = x; applied += 1; }
-            }
-            "optimizer" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.optimizer = x; applied += 1; }
-            }
-            "lisa_layers" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.lisa_layers = x; applied += 1; }
-            }
-            "lisa_interval" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.lisa_interval = x; applied += 1; }
-            }
-            "quant4" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.quant4 = x; applied += 1; }
-            }
-            "attn" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.attn = x; applied += 1; }
-            }
-            "replay_file" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.replay_file = x; applied += 1; }
-            }
-            "replay_ratio" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.replay_ratio = x; applied += 1; }
-            }
-            "kl_anchor" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.kl_anchor = x; applied += 1; }
-            }
-            "objective" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.objective = x; applied += 1; }
-            }
-            "orpo_file" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.orpo_file = x; applied += 1; }
-            }
-            "orpo_beta" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.orpo_beta = x; applied += 1; }
-            }
-            "heretic_trials" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.heretic_trials = x; applied += 1; }
-            }
-            "heretic_startup_trials" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.heretic_startup_trials = x; applied += 1; }
-            }
-            "heretic_quant" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.heretic_quant = x; applied += 1; }
-            }
-            "kd_weight" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.kd_weight = x; applied += 1; }
-            }
-            "kd_top_k" => {
-                if let Some(x) = need(&v, &key, &mut problems) { form.kd_top_k = x; applied += 1; }
-            }
-            "amp" => { form.amp = true; applied += 1; }
-            "no_amp" => { form.amp = false; applied += 1; }
-            "no_grad_checkpointing" => { form.grad_checkpointing = false; applied += 1; }
-            "gradient_checkpointing" => { form.grad_checkpointing = true; applied += 1; }
-            "liger" => { form.liger = true; applied += 1; }
-            "compile" => { form.compile = true; applied += 1; }
-            "packing" => { form.packing = true; applied += 1; }
-            "group_by_length" => { form.group_by_length = true; applied += 1; }
-            "kd" => { form.kd = true; applied += 1; }
-            "cache" => { form.cache = true; applied += 1; }
-            "no_cache" => { form.cache = false; applied += 1; }
-            _ => {
-                let mut piece = format!("--{key}");
-                if let Some(v) = value {
-                    if v.contains(' ') {
-                        piece.push_str(&format!(" \"{v}\""));
-                    } else {
-                        piece.push(' ');
-                        piece.push_str(&v);
-                    }
-                }
-                extra.push(piece);
+        if let Some(slot) = form_text_field(form, &key) {
+            if let Some(x) = need(&v, &key, &mut problems) {
+                *slot = x;
                 applied += 1;
             }
+            continue;
         }
+        let flag: Option<(&mut bool, bool)> = match key.as_str() {
+            "amp" => Some((&mut form.amp, true)),
+            "no_amp" => Some((&mut form.amp, false)),
+            "no_grad_checkpointing" => Some((&mut form.grad_checkpointing, false)),
+            "gradient_checkpointing" => Some((&mut form.grad_checkpointing, true)),
+            "liger" => Some((&mut form.liger, true)),
+            "compile" => Some((&mut form.compile, true)),
+            "packing" => Some((&mut form.packing, true)),
+            "group_by_length" => Some((&mut form.group_by_length, true)),
+            "kd" => Some((&mut form.kd, true)),
+            "cache" => Some((&mut form.cache, true)),
+            "no_cache" => Some((&mut form.cache, false)),
+            _ => None,
+        };
+        if let Some((slot, on)) = flag {
+            *slot = on;
+            applied += 1;
+            continue;
+        }
+        let mut piece = format!("--{key}");
+        if let Some(v) = value {
+            if v.contains(' ') {
+                piece.push_str(&format!(" \"{v}\""));
+            } else {
+                piece.push(' ');
+                piece.push_str(&v);
+            }
+        }
+        extra.push(piece);
+        applied += 1;
     }
 
     form.extra = extra.join(" ");
     (applied - extra.len(), extra.len(), problems)
+}
+
+/// Строковые поля формы и их алиасы из аргументов main.py.
+fn form_text_field<'a>(form: &'a mut Form, key: &str) -> Option<&'a mut String> {
+    match key {
+        "model" => Some(&mut form.model),
+        "train_file" | "data" => Some(&mut form.train_file),
+        "val_file" | "val" => Some(&mut form.val_file),
+        "output_dir" | "out" => Some(&mut form.out),
+        "identity_file" => Some(&mut form.identity_file),
+        "epochs" => Some(&mut form.epochs),
+        "lr" => Some(&mut form.lr),
+        "max_grad_norm" => Some(&mut form.max_grad_norm),
+        "warmup_ratio" => Some(&mut form.warmup_ratio),
+        "max_length" => Some(&mut form.max_length),
+        "max_samples" => Some(&mut form.max_samples),
+        "batch_size" => Some(&mut form.batch_size),
+        "grad_accum" => Some(&mut form.grad_accum),
+        "save_steps" => Some(&mut form.save_steps),
+        "lora_r" => Some(&mut form.lora_r),
+        "lora_alpha" => Some(&mut form.lora_alpha),
+        "lora_plus_ratio" => Some(&mut form.lora_plus_ratio),
+        "tune_mode" => Some(&mut form.tune_mode),
+        "preset" => Some(&mut form.preset),
+        "dtype" => Some(&mut form.dtype),
+        "amp_dtype" => Some(&mut form.amp_dtype),
+        "optimizer" => Some(&mut form.optimizer),
+        "lisa_layers" => Some(&mut form.lisa_layers),
+        "lisa_interval" => Some(&mut form.lisa_interval),
+        "quant4" => Some(&mut form.quant4),
+        "attn" => Some(&mut form.attn),
+        "replay_file" => Some(&mut form.replay_file),
+        "replay_ratio" => Some(&mut form.replay_ratio),
+        "kl_anchor" => Some(&mut form.kl_anchor),
+        "objective" => Some(&mut form.objective),
+        "orpo_file" => Some(&mut form.orpo_file),
+        "orpo_beta" => Some(&mut form.orpo_beta),
+        "heretic_trials" => Some(&mut form.heretic_trials),
+        "heretic_startup_trials" => Some(&mut form.heretic_startup_trials),
+        "heretic_quant" => Some(&mut form.heretic_quant),
+        "kd_weight" => Some(&mut form.kd_weight),
+        "kd_top_k" => Some(&mut form.kd_top_k),
+        _ => None,
+    }
 }
 
 fn warn_color() -> egui::Color32 {
@@ -596,12 +552,7 @@ impl GuiApp {
     }
 
     fn tab_title(&self) -> &'static str {
-        match self.tab {
-            Tab::Chat => tr("Чат"),
-            Tab::Train => tr("Обучение"),
-            Tab::Download => tr("Хаб моделей"),
-            Tab::Settings => tr("Настройки"),
-        }
+        tab_label(self.tab)
     }
 
     /// M3 top app bar: заголовок экрана, перетаскивание и кнопки окна.
@@ -808,10 +759,6 @@ impl GuiApp {
         self.theme.apply(ctx);
     }
 
-    fn signature(&self) -> String {
-        serde_json::to_string(&self.form.settings()).unwrap_or_default()
-    }
-
     fn apply_training_command(&mut self) {
         let (applied, extra, problems) = apply_flags(&mut self.form, &self.cmd_input);
         if applied == 0 && extra == 0 {
@@ -837,7 +784,7 @@ impl GuiApp {
 
     fn start_check(&mut self) {
         let settings = self.form.settings();
-        self.checked_sig = Some(serde_json::to_string(&settings).unwrap_or_default());
+        self.checked_sig = Some(settings.clone());
         let (tx, rx) = std::sync::mpsc::channel();
         let python = self.base.python.clone();
         let engine = self.base.engine.clone();
@@ -894,7 +841,7 @@ impl GuiApp {
         if let Some(v) = p.amp {
             self.form.amp = v;
         }
-        self.checked_sig = Some(self.signature());
+        self.checked_sig = Some(self.form.settings());
     }
 
     fn poll_check(&mut self) {
@@ -937,9 +884,9 @@ impl GuiApp {
     }
 
     fn start_clicked(&mut self) {
-        let sig = self.signature();
+        let settings = self.form.settings();
         if let CheckState::Done(r) = &self.check {
-            if self.checked_sig.as_deref() == Some(sig.as_str()) {
+            if self.checked_sig.as_ref() == Some(&settings) {
                 if r.errors == 0 {
                     self.start_training();
                 } else {
@@ -1072,14 +1019,9 @@ impl eframe::App for GuiApp {
                     self.tab = Tab::Chat;
                 }
                 ui.add_space(6.0);
-                for (tab, label) in [
-                    (Tab::Chat, tr("Чат")),
-                    (Tab::Download, tr("Хаб моделей")),
-                    (Tab::Train, tr("Обучение")),
-                    (Tab::Settings, tr("Настройки")),
-                ] {
+                for tab in [Tab::Chat, Tab::Download, Tab::Train, Tab::Settings] {
                     let selected = self.tab == tab;
-                    if nav_item(ui, &self.theme, label, selected).clicked() {
+                    if nav_item(ui, &self.theme, tab, tab_label(tab), selected).clicked() {
                         if self.tab != tab {
                             self.scroll_top = true;
                             self.content_alpha = 0.0;
@@ -1280,7 +1222,7 @@ impl eframe::App for GuiApp {
 }
 
 /// Пункт M3 navigation drawer: индикатор-пилюля secondary_container.
-fn nav_item(ui: &mut egui::Ui, theme: &Theme, label: &str, selected: bool) -> egui::Response {
+fn nav_item(ui: &mut egui::Ui, theme: &Theme, tab: Tab, label: &str, selected: bool) -> egui::Response {
     let p = theme.pal;
     let (rect, resp) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 44.0),
@@ -1298,7 +1240,7 @@ fn nav_item(ui: &mut egui::Ui, theme: &Theme, label: &str, selected: bool) -> eg
         painter.rect_filled(bar, egui::Rounding::ZERO, p.primary);
     }
     let fg = if selected { p.on_surface } else { p.on_surface_variant };
-    nav_icon(painter, rect, label, fg, fg);
+    nav_icon(painter, rect, tab, fg, fg);
     painter.text(
         egui::pos2(rect.left() + 48.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -1407,7 +1349,7 @@ fn project_row(
     }
     let row_clicked = resp.clicked();
     let del_clicked = del.clicked();
-    let _ = resp.on_hover_text(path);
+    resp.on_hover_text(path);
     (row_clicked && !del_clicked, del_clicked)
 }
 
@@ -1562,15 +1504,12 @@ fn draw_resize_edges(ctx: &egui::Context) {
 }
 
 /// Простые векторные иконки, чтобы не тянуть icon-шрифт.
-fn nav_icon(painter: &egui::Painter, rect: egui::Rect, label: &str, color: egui::Color32, _accent: egui::Color32) {
-    let code = if label.contains(tr("Чат")) {
-        theme::icons::CHAT
-    } else if label.contains(tr("Хаб")) {
-        theme::icons::DASHBOARD
-    } else if label.contains(tr("Обучение")) {
-        theme::icons::TUNE
-    } else {
-        theme::icons::SETTINGS
+fn nav_icon(painter: &egui::Painter, rect: egui::Rect, tab: Tab, color: egui::Color32, _accent: egui::Color32) {
+    let code = match tab {
+        Tab::Chat => theme::icons::CHAT,
+        Tab::Download => theme::icons::DASHBOARD,
+        Tab::Train => theme::icons::TUNE,
+        Tab::Settings => theme::icons::SETTINGS,
     };
     theme::draw_icon(
         painter,
@@ -1870,8 +1809,6 @@ impl GuiApp {
 
     fn ui_preview(&mut self, ui: &mut egui::Ui) {
         let p = self.theme.pal;
-        let r = 8;
-        let _ = r;
         self.theme.card(p.surface_container_low, 12.0).show(ui, |ui| {
             ui.set_width(ui.available_width());
             let (status_text, status_color) = match &self.check {
@@ -2506,7 +2443,7 @@ mod command_tests {
                 .iter()
                 .find(|(key, _)| key == k)
                 .cloned()
-                .unwrap_or_else(|| panic!(tr("нет флага {k}")))
+                .unwrap_or_else(|| panic!("{}", crate::tf!("нет флага {k}", "no flag {k}")))
         };
         assert_eq!(get("model").1.as_deref(), Some("models/gemma_base"));
         assert_eq!(get("epochs").1.as_deref(), Some("2"));

@@ -26,6 +26,18 @@ def _cache_slug(path: str) -> str:
     return hashlib.md5(os.path.abspath(path).encode("utf-8")).hexdigest()[:12]
 
 
+# Блок ответа ассистента в поддерживаемых chat-шаблонах. Компилируется один раз:
+# шаблон один и тот же для всех сэмплов (165k+ строк).
+ASSISTANT_RE = re.compile(
+    r'(<\|turn>model\n|<start_of_turn>model\n|<\|im_start\|>assistant\n|<\|assistant\|>\n'
+    r'|<\|start_header_id\|>assistant<\|end_header_id\|>\n\n'
+    r'|<\|message\|>assistant\n)'
+    r'(.*?)'
+    r'(<turn\|>|<end_of_turn>|<\|im_end\|>|<\|eot_id\|>|<\|end\|>|<turn\|>\n|$)',
+    re.DOTALL
+)
+
+
 class StreamingConversationDataset(IterableDataset):
     def __init__(
         self,
@@ -235,15 +247,7 @@ class StreamingConversationDataset(IterableDataset):
             labels = input_ids.clone()
         else:
             labels = torch.full_like(input_ids, -100)
-            pattern = re.compile(
-                r'(<\|turn>model\n|<start_of_turn>model\n|<\|im_start\|>assistant\n|<\|assistant\|>\n'
-                r'|<\|start_header_id\|>assistant<\|end_header_id\|>\n\n'
-                r'|<\|message\|>assistant\n)'
-                r'(.*?)'
-                r'(<turn\|>|<end_of_turn>|<\|im_end\|>|<\|eot_id\|>|<\|end\|>|<turn\|>\n|$)',
-                re.DOTALL
-            )
-            for match in pattern.finditer(full_text):
+            for match in ASSISTANT_RE.finditer(full_text):
                 start_char = match.start(2)
                 end_char = match.end()
                 for idx, (token_start, token_end) in enumerate(offset_mapping):

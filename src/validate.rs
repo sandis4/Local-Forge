@@ -8,7 +8,9 @@ use std::os::windows::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Clone)]
+/// Сериализуемое зеркало формы GUI (`Form`). Уходит в forge_plan.py;
+/// дефолты здесь — то, что видит план, а не то, что уходит тренеру.
+#[derive(Serialize, Clone, PartialEq)]
 pub struct Settings {
     pub model: String,
     pub train_file: String,
@@ -55,84 +57,55 @@ pub struct Settings {
 }
 
 #[derive(Deserialize, Default, Clone)]
+#[serde(default)]
 pub struct Hardware {
-    #[serde(default)]
     pub cpu: Option<u32>,
-    #[serde(default)]
     pub ram_total_gb: Option<f64>,
-    #[serde(default)]
     pub ram_avail_gb: Option<f64>,
-    #[serde(default)]
     pub cuda: Option<bool>,
-    #[serde(default)]
     pub gpu: Option<String>,
-    #[serde(default)]
     pub vram_gb: Option<f64>,
-    #[serde(default)]
     pub disk_free_gb: Option<f64>,
-    #[serde(default)]
     pub torch: Option<String>,
-    #[serde(default)]
     pub python: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
+#[serde(default)]
 pub struct Plan {
-    #[serde(default)]
     pub strategy: Option<String>,
-    #[serde(default)]
     pub weights_gb: Option<f64>,
-    #[serde(default)]
     pub max_length: Option<u32>,
-    #[serde(default)]
     pub batch_size: Option<u32>,
-    #[serde(default)]
     pub grad_accum: Option<u32>,
-    #[serde(default)]
     pub optimizer: Option<String>,
-    #[serde(default)]
     pub lisa_layers: Option<u32>,
-    #[serde(default)]
     pub lisa_interval: Option<u32>,
-    #[serde(default)]
     pub lora_r: Option<u32>,
-    #[serde(default)]
     pub lora_alpha: Option<u32>,
-    #[serde(default)]
     pub save_steps: Option<u32>,
-    #[serde(default)]
     pub amp: Option<bool>,
-    #[serde(default)]
     pub amp_dtype: Option<String>,
-    #[serde(default)]
     pub gradient_checkpointing: Option<bool>,
-    #[serde(default)]
     pub dtype: Option<String>,
-    #[serde(default)]
     pub quant4: Option<String>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
 pub struct Check {
-    #[serde(default)]
     pub level: String,
-    #[serde(default)]
     pub field: String,
-    #[serde(default)]
     pub message: String,
 }
 
 #[derive(Deserialize, Default, Clone)]
+#[serde(default)]
 pub struct Report {
-    #[serde(default)]
     pub hardware: Hardware,
-    #[serde(default)]
     pub plan: Plan,
-    #[serde(default)]
     pub checks: Vec<Check>,
-    #[serde(default)]
     pub errors: u32,
-    #[serde(default)]
     pub warnings: u32,
 }
 
