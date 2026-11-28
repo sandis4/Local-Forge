@@ -1269,6 +1269,21 @@ impl Chat {
                     small_field(ui, theme, &mut self.temp, "0.7");
                 });
                 ui.add_space(6.0);
+                ui.add_space(6.0);
+                if ui
+                    .checkbox(
+                        &mut self.moe_lazy,
+                        tr("MoE: грузить только используемые эксперты (эксперимент)"),
+                    )
+                    .changed()
+                {
+                    // Значение уйдёт в движок при следующей загрузке модели.
+                }
+                if self.moe_lazy {
+                    ui.label(theme.label(tr(
+                        "Экспериментально: эксперты читаются с SSD по требованию. Сильно нагружает диск и CPU. Только для transformers-моделей (не GGUF).",
+                    )));
+                }
                 ui.horizontal(|ui| {
                     ui.label(theme.label(tr("LoRA-адаптер")));
                     let current = if self.adapter.is_empty() {

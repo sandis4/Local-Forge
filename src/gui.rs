@@ -1173,6 +1173,11 @@ impl eframe::App for GuiApp {
                             self.tab = Tab::Download;
                         }
                     }
+                    // MoE-режим можно переключить и в «Параметрах» чата — сохраняем.
+                    if self.settings.chat_moe_lazy != self.chat.moe_lazy {
+                        self.settings.chat_moe_lazy = self.chat.moe_lazy;
+                        self.persist_settings();
+                    }
                 } else if self.tab == Tab::Download {
                     // Хаб сам держит шапку и две независимые прокрутки.
                     self.ui_hub(ui);
