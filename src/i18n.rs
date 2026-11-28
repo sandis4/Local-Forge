@@ -44,7 +44,7 @@ fn en(text: &'static str) -> &'static str {
         "KL-якорь к базе (0 = выкл)" => "KL anchor to base (0 = off)",
         "KV-кэш" => "KV cache",
         "MoE: грузить только используемые эксперты (эксперимент)" => "MoE: load only the experts in use (experimental)",
-        "Экспериментально: эксперты читаются с SSD по требованию. Сильно нагружает диск и CPU. Только для transformers-моделей (не GGUF)." => "Experimental: experts are read from SSD on demand. Heavy disk and CPU load. Transformers models only (not GGUF).",
+        "Экспериментально: transformers — эксперты читаются с SSD по требованию; GGUF — mmap без прогрева и сброс страниц после ответа. Сильно нагружает диск и CPU." => "Experimental: transformers reads routed experts from SSD on demand; GGUF uses mmap without warmup and drops pages after each reply. Heavy disk and CPU load.",
         "LISA: интервал" => "LISA: interval",
         "LISA: слоёв (0 = все)" => "LISA: layers (0 = all)",
         "Length grouping — сортировка по длине (меньше padding)" => "Length grouping — sort by length (less padding)",

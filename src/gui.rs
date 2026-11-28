@@ -1703,7 +1703,7 @@ impl GuiApp {
             }
             if self.settings.chat_moe_lazy {
                 ui.label(self.theme.label(tr(
-                    "Экспериментально: эксперты читаются с SSD по требованию. Сильно нагружает диск и CPU. Только для transformers-моделей (не GGUF).",
+                    "Экспериментально: transformers — эксперты читаются с SSD по требованию; GGUF — mmap без прогрева и сброс страниц после ответа. Сильно нагружает диск и CPU.",
                 )));
             }
         });

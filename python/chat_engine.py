@@ -912,16 +912,49 @@ class _ServerExit(RuntimeError):
 
 
 class GgufBackend:
-    def __init__(self, model, threads, ctx, kv_type="f16"):
+    def __init__(self, model, threads, ctx, kv_type="f16", moe_lazy=False):
         self.model = model
         self.threads = max(1, min(int(threads), physical_cores()))
         self.ctx = ctx
         self.kv_type = kv_type
+        self.moe_lazy = bool(moe_lazy)
         self.proc = None
         self.port = None
         self.native_reasoning = False
         self.tag_reasoning = False
         self.log = os.path.join(os.environ.get("TEMP", "."), "local_forge_llama.log")
+
+    def _trim_pages(self):
+        """Экспериментальный GGUF-MoE: выкинуть страницы модели из памяти.
+
+        llama.cpp и так грузит GGUF через mmap и трогает только выбранных
+        экспертов. После ответа сбрасываем кэш страниц, чтобы не держать в
+        RAM всех экспертов: следующая генерация снова читает их с SSD.
+        Windows — рабочий набор процесса llama-server, Unix — page cache файла.
+        """
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        try:
+            if os.name == "nt":
+                import ctypes
+                k32 = ctypes.windll.kernel32
+                psapi = ctypes.windll.psapi
+                k32.OpenProcess.restype = ctypes.c_void_p
+                k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+                h = k32.OpenProcess(0x0400 | 0x0100, False, int(self.proc.pid))
+                if h:
+                    psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+                    psapi.EmptyWorkingSet.restype = ctypes.c_int
+                    psapi.EmptyWorkingSet(h)
+                    k32.CloseHandle(ctypes.c_void_p(h))
+            else:
+                fd = os.open(self.model, os.O_RDONLY)
+                try:
+                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                finally:
+                    os.close(fd)
+        except Exception as e:
+            print(f"[MoE] GGUF: не удалось сбросить страницы: {e}", file=sys.stderr)
 
     def _detect_reasoning(self):
         try:
@@ -990,6 +1023,9 @@ class GgufBackend:
         exe = find_llama_server()
         if not exe:
             raise RuntimeError("не найден llama_bin/llama-server (или llama-server.exe) — GGUF-путь недоступен")
+        if self.moe_lazy:
+            emit({"ev": "loading", "message":
+                  "GGUF MoE: mmap без прогрева, страницы выгружаются после ответа (эксперимент)"})
         try:
             size = os.path.getsize(self.model)
         except OSError:
@@ -1052,6 +1088,10 @@ class GgufBackend:
             cmd.append("-fa")
         if low_mem:
             cmd += ["-b", "512", "-ub", "128"]
+        if self.moe_lazy and supports_flag(exe, "--no-warmup"):
+            # Прогрев трогает веса всех экспертов; без него первый ответ
+            # читает с SSD только реально выбранных.
+            cmd.append("--no-warmup")
         if self.kv_type and self.kv_type != "f16":
             # Сжатый KV-кэш экономит RAM на длинном контексте (как в Unsloth).
             cmd += ["-ctk", self.kv_type, "-ctv", self.kv_type]
@@ -1075,7 +1115,8 @@ class GgufBackend:
             try:
                 with urllib.request.urlopen(url, timeout=2) as r:
                     if r.status == 200:
-                        return "llama.cpp, контекст %d, потоков %d" % (self.ctx, self.threads)
+                        note = " · MoE mmap" if self.moe_lazy else ""
+                        return "llama.cpp, контекст %d, потоков %d%s" % (self.ctx, self.threads, note)
             except Exception:
                 pass
             time.sleep(1.0)
@@ -1149,6 +1190,8 @@ class GgufBackend:
             if parser is not None:
                 parser.finish()
             elapsed = max(1e-6, time.time() - started)
+            if self.moe_lazy:
+                self._trim_pages()
         return (usage_tokens or tokens), elapsed
 
     def _request(self, messages, max_tokens, temp, tools=None, on_event=None,
@@ -1185,12 +1228,16 @@ class GgufBackend:
         thread.start()
         while thread.is_alive():
             if should_stop and should_stop():
+                if self.moe_lazy:
+                    self._trim_pages()
                 return None
             if on_event:
                 on_event({"ev": "heartbeat"})
             thread.join(5)
         if "err" in result:
             raise RuntimeError(result["err"])
+        if self.moe_lazy:
+            self._trim_pages()
         return result.get("v")
 
     def run_agent(self, task, root, max_steps, max_tokens, temp, on_event,
@@ -1481,7 +1528,7 @@ def main():
                 kv_type = req.get("kv_type") or "f16"
                 with backend_lock:
                     if model.lower().endswith(".gguf"):
-                        backend = GgufBackend(model, threads, ctx, kv_type)
+                        backend = GgufBackend(model, threads, ctx, kv_type, moe_lazy)
                         backend_kind = "gguf"
                     else:
                         backend = TransformersBackend(model, adapter, threads, moe_lazy)
