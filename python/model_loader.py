@@ -11,6 +11,9 @@
 
 import glob
 import os
+import threading
+import types
+from collections import OrderedDict
 
 import psutil
 import torch
@@ -245,6 +248,135 @@ def trim_expert_pages(model):
         print(f"[MoE] сброс страниц не удался: {e}", file=sys.stderr)
 
 
+class _StreamExpertCache:
+    """Ограниченный LRU-кэш весов экспертов, читаемых прямо из safetensors.
+
+    Для упакованных экспертов (3D gate_up_proj/down_proj) читается только
+    срез [expert_idx]; для по-экспертных ключей — отдельный тензор. Так RAM
+    ограничен кэшем, а не размером всех экспертов.
+    """
+
+    def __init__(self, index, max_bytes):
+        self.index = index
+        self.max_bytes = max(64 * 1024 * 1024, int(max_bytes))
+        self.handles = {}
+        self.cache = OrderedDict()
+        self.bytes = 0
+        self.lock = threading.Lock()
+
+    def _handle(self, path):
+        h = self.handles.get(path)
+        if h is None:
+            h = safe_open(path, framework="pt", device="cpu")
+            self.handles[path] = h
+        return h
+
+    def tensor(self, key):
+        def load():
+            return self._handle(self.index[key]).get_tensor(key)
+        return self._cached(key, load)
+
+    def slice(self, key, idx):
+        def load():
+            return self._handle(self.index[key]).get_slice(key)[idx]
+        return self._cached((key, idx), load)
+
+    def _cached(self, cache_key, load):
+        with self.lock:
+            hit = self.cache.get(cache_key)
+            if hit is not None:
+                self.cache.move_to_end(cache_key)
+                return hit[0]
+        t = load()
+        size = t.numel() * t.element_size()
+        with self.lock:
+            hit = self.cache.get(cache_key)
+            if hit is not None:
+                return hit[0]
+            while self.bytes + size > self.max_bytes and self.cache:
+                _, (_, old_size) = self.cache.popitem(last=False)
+                self.bytes -= old_size
+            self.cache[cache_key] = (t, size)
+            self.bytes += size
+        return t
+
+
+def _stream_specs(model, alias):
+    """Найти модули экспертов, которые умеем читать по требованию.
+
+    Поддержаны архитектуры с `*Experts` и полями gate_up_proj/down_proj:
+    Gemma 4 MoE, Qwen2/3-MoE, Mixtral и т.п. Чекпоинт может хранить как
+    упакованные 3D-тензоры, так и отдельные gate/up/down на эксперта.
+    """
+    specs = []
+    for name, mod in model.named_modules():
+        if not type(mod).__name__.endswith("Experts"):
+            continue
+        if not (hasattr(mod, "gate_up_proj") and hasattr(mod, "down_proj")):
+            continue
+        # Потоковый forward повторяет конкретную сигнатуру. Если у класса
+        # другая — не рискуем, уходим в запасной режим.
+        try:
+            import inspect
+            params = [p.name for p in inspect.signature(type(mod).forward).parameters.values()
+                      if p.name != "self"]
+            if params[:3] != ["hidden_states", "top_k_index", "top_k_weights"]:
+                continue
+        except (TypeError, ValueError):
+            continue
+        gu_key = alias.get(f"{name}.gate_up_proj")
+        down_key = alias.get(f"{name}.down_proj")
+        stacked = bool(gu_key and down_key)
+        per_expert = None
+        if not stacked:
+            n = int(getattr(mod, "num_experts", 0) or 0)
+            per_expert = []
+            for e in range(n):
+                gk = alias.get(f"{name}.{e}.gate_proj.weight")
+                uk = alias.get(f"{name}.{e}.up_proj.weight")
+                dk = alias.get(f"{name}.{e}.down_proj.weight")
+                if not (gk and uk and dk):
+                    per_expert = None
+                    break
+                per_expert.append((gk, uk, dk))
+        if stacked or per_expert:
+            specs.append((name, mod, stacked, gu_key, down_key, per_expert))
+    return specs
+
+
+def _make_stream_forward(module, cache, name, stacked, gu_key, down_key, per_expert):
+    """forward, повторяющий штатную математику экспертов, но веса читает с диска."""
+    num_experts = int(module.num_experts)
+    act_fn = module.act_fn
+
+    def forward(self, hidden_states, top_k_index, top_k_weights, *args, **kwargs):
+        final = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            mask = torch.nn.functional.one_hot(top_k_index, num_classes=num_experts).permute(2, 1, 0)
+            hit = torch.greater(mask.sum(dim=(-1, -2)), 0).nonzero()
+        for e in hit:
+            e = int(e[0])
+            if e == num_experts:
+                continue
+            pos, tok = torch.where(mask[e])
+            x = hidden_states[tok]
+            if stacked:
+                gu = cache.slice(gu_key, e)
+                down = cache.slice(down_key, e)
+                gate, up = torch.nn.functional.linear(x, gu).chunk(2, dim=-1)
+            else:
+                gk, uk, dk = per_expert[e]
+                gate = torch.nn.functional.linear(x, cache.tensor(gk))
+                up = torch.nn.functional.linear(x, cache.tensor(uk))
+                down = cache.tensor(dk)
+            y = torch.nn.functional.linear(act_fn(gate) * up, down)
+            y = y * top_k_weights[tok, pos, None]
+            final.index_add_(0, tok, y.to(final.dtype))
+        return final
+
+    return forward
+
+
 def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpointing: bool = True,
                     force_mmap: bool = None, attn: str = None, quant4=None,
                     moe_lazy: bool = False):
@@ -267,9 +399,9 @@ def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpoint
         cfg = AutoConfig.from_pretrained(model_dir)
         moe_active = _is_moe_config(cfg)
         if moe_active:
-            print("[MoE] Экспериментальный режим: эксперты читаются с SSD по требованию, "
-                  "после каждой генерации их страницы выгружаются. Это сильно нагружает "
-                  "диск и CPU; работает только для transformers (safetensors), не для GGUF.")
+            print("[MoE] Экспериментальный режим: веса экспертов читаются с SSD по требованию "
+                  "и кэшируются ограниченно. Это сильно нагружает диск и CPU; работает "
+                  "только для transformers (safetensors), не для GGUF.")
         else:
             print("[MoE] В конфиге модели нет экспертов — ленивый режим выключен.")
 
@@ -350,6 +482,13 @@ def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpoint
     alias = _alias_keys(index)
     handles = {}
 
+    # Ленивый MoE: модули экспертов не заполняем — их веса читает кэш по требованию.
+    stream_specs = _stream_specs(model, alias) if moe_active else []
+    stream_names = set()
+    for _n, _m, _stacked, *_rest in stream_specs:
+        stream_names.add(f"{_n}.gate_up_proj")
+        stream_names.add(f"{_n}.down_proj")
+
     def get_tensor(key):
         path = index[key]
         if path not in handles:
@@ -363,6 +502,8 @@ def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpoint
             if p is None:
                 continue
             full = f"{name}.{pname}" if name else pname
+            if full in stream_names:
+                continue
             key = alias.get(full)
             if key is not None:
                 w = get_tensor(key)
@@ -371,7 +512,7 @@ def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpoint
 
     # 2) Догружаем пропуски (ties вроде lm_head.weight, нестандартные ключи)
     for full, p in model.named_parameters(remove_duplicate=False):
-        if p is None or p.device.type != "meta":
+        if p is None or p.device.type != "meta" or full in stream_names:
             continue
         key = alias.get(full)
         if full in filled:
@@ -411,20 +552,35 @@ def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpoint
             if still:
                 print(f"[Loader] ВНИМАНИЕ: у {name} не закрылись буферы: {still}")
 
-    # 4) Контроль: meta-тензоров не осталось
-    leftovers = [n for n, p in model.named_parameters(remove_duplicate=False) if p is not None and p.device.type == "meta"]
+    # 4) Контроль: meta-тензоров не осталось (кроме намеренно потоковых экспертов)
+    leftovers = [n for n, p in model.named_parameters(remove_duplicate=False)
+                 if p is not None and p.device.type == "meta" and n not in stream_names]
     leftovers += [f"{n}.{bn}" for n, m in model.named_modules() for bn, b in m._buffers.items()
                   if b is not None and b.device.type == "meta"]
     if leftovers:
         raise RuntimeError(f"После mmap-загрузки остались meta-тензоры: {leftovers[:10]}")
 
     model._mmap_handles = handles  # держим дескрипторы живыми, пока живы mmap-веса
-    if moe_active:
+    if stream_specs:
+        budget_mb = int(os.environ.get("LOCAL_FORGE_MOE_CACHE_MB", "0") or 0)
+        if budget_mb <= 0:
+            budget_mb = int(min(2048.0, max(256.0, psutil.virtual_memory().available / 1e6 * 0.25)))
+        streamer = _StreamExpertCache(index, budget_mb * 1024 * 1024)
+        for name, mod, stacked, gu_key, down_key, per_expert in stream_specs:
+            mod.forward = types.MethodType(
+                _make_stream_forward(mod, streamer, name, stacked, gu_key, down_key, per_expert), mod)
+        model._moe_stream_cache = streamer
+        model._moe_stream = True
+        info["moe_stream"] = True
+        mode = "упакованные 3D" if all(s[2] for s in stream_specs) else "по-экспертные ключи"
+        print(f"[MoE] Потоковый режим: {len(stream_specs)} слоёв, {mode}, "
+              f"кэш экспертов {budget_mb} МБ. Веса экспертов не занимают RAM целиком.")
+    if moe_active and not stream_specs:
         experts = _expert_tensors(model)
         model._moe_lazy = True
         model._moe_expert_tensors = experts
-        print(f"[MoE] Ленивый режим включён: экспертных тензоров {len(experts)}; "
-              f"страницы выгружаются после каждой генерации.")
+        print("[MoE] Архитектура экспертов не поддержана потоково — старый режим "
+              "(mmap + сброс страниц после генерации).")
     if gradient_checkpointing:
         model.gradient_checkpointing_enable()
     gc_collect = __import__("gc").collect()

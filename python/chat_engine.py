@@ -1278,10 +1278,15 @@ class TransformersBackend:
         self.tokenizer = AutoTokenizer.from_pretrained(tok_src, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        has_adapter = bool(self.adapter and os.path.exists(os.path.join(self.adapter, "adapter_config.json")))
+        use_lazy = self.moe_lazy
+        if use_lazy and has_adapter:
+            emit({"ev": "loading", "message": "MoE-поток несовместим с LoRA — гружу обычным путём"})
+            use_lazy = False
         model, info = load_model_auto(self.model_path, gradient_checkpointing=False,
-                                      moe_lazy=self.moe_lazy)
+                                      moe_lazy=use_lazy)
         model.eval()
-        if self.adapter and os.path.exists(os.path.join(self.adapter, "adapter_config.json")):
+        if has_adapter:
             from peft import PeftModel
             emit({"ev": "loading", "message": "Подключаю LoRA-адаптер…"})
             model = PeftModel.from_pretrained(model, self.adapter)
@@ -1290,7 +1295,9 @@ class TransformersBackend:
             except Exception:
                 pass
         self.model = model
-        if info.get("moe_lazy"):
+        if info.get("moe_stream"):
+            emit({"ev": "loading", "message": "MoE: эксперты читаются с SSD по требованию (эксперимент)"})
+        elif info.get("moe_lazy"):
             self._trim = trim_expert_pages
             emit({"ev": "loading", "message": "MoE: эксперты читаются с SSD по требованию (эксперимент)"})
         where = "mmap" if info.get("mmap") else "RAM"
