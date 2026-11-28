@@ -43,6 +43,8 @@ fn en(text: &'static str) -> &'static str {
         "Heretic: квантование" => "Heretic: quantization",
         "KL-якорь к базе (0 = выкл)" => "KL anchor to base (0 = off)",
         "KV-кэш" => "KV cache",
+        "MoE: грузить только используемые эксперты (эксперимент)" => "MoE: load only the experts in use (experimental)",
+        "Экспериментально: эксперты читаются с SSD по требованию. Сильно нагружает диск и CPU. Только для transformers-моделей (не GGUF)." => "Experimental: experts are read from SSD on demand. Heavy disk and CPU load. Transformers models only (not GGUF).",
         "LISA: интервал" => "LISA: interval",
         "LISA: слоёв (0 = все)" => "LISA: layers (0 = all)",
         "Length grouping — сортировка по длине (меньше padding)" => "Length grouping — sort by length (less padding)",

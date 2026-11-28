@@ -706,6 +706,7 @@ impl GuiApp {
         self.chat.threads = self.settings.chat_threads.to_string();
         self.chat.ctx = self.settings.chat_ctx.to_string();
         self.chat.kv_type = self.settings.chat_kv.clone();
+        self.chat.moe_lazy = self.settings.chat_moe_lazy;
         self.chat.max_tokens = self.settings.chat_max_tokens.to_string();
         self.chat.temp = format!("{}", self.settings.chat_temp);
         self.chat.agent = self.settings.chat_agent;
@@ -1685,6 +1686,21 @@ impl GuiApp {
                     }
                 });
             });
+            ui.add_space(8.0);
+            if ui
+                .checkbox(
+                    &mut self.settings.chat_moe_lazy,
+                    tr("MoE: грузить только используемые эксперты (эксперимент)"),
+                )
+                .changed()
+            {
+                dirty = true;
+            }
+            if self.settings.chat_moe_lazy {
+                ui.label(self.theme.label(tr(
+                    "Экспериментально: эксперты читаются с SSD по требованию. Сильно нагружает диск и CPU. Только для transformers-моделей (не GGUF).",
+                )));
+            }
         });
 
         ui.add_space(10.0);

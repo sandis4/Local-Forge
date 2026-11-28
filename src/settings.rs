@@ -16,6 +16,8 @@ pub struct AppSettings {
     pub chat_threads: u32,
     pub chat_ctx: u32,
     pub chat_kv: String,
+    /// Экспериментальный ленивый MoE: эксперты читаются с SSD по требованию.
+    pub chat_moe_lazy: bool,
     pub chat_max_tokens: u32,
     pub chat_temp: f32,
     /// Публичный OpenAI-совместимый API к текущей модели (Radmin VPN).
@@ -53,6 +55,7 @@ impl Default for AppSettings {
             chat_threads: 8,
             chat_ctx: 2048,
             chat_kv: "f16".into(),
+            chat_moe_lazy: false,
             chat_max_tokens: 256,
             chat_temp: 0.7,
             chat_api: false,

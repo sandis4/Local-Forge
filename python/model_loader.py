@@ -169,8 +169,85 @@ def _resolve_attn(attn: str = None):
     return None
 
 
+def _is_moe_config(cfg):
+    """Есть ли в конфиге эксперты (Gemma 4 E2B, Mixtral, Qwen-MoE и т.п.)."""
+    for obj in (cfg, getattr(cfg, "text_config", None), getattr(cfg, "llm_config", None)):
+        if obj is None:
+            continue
+        for key in ("num_experts", "num_local_experts", "n_routed_experts",
+                    "num_experts_per_tok", "num_experts_per_token",
+                    "moe_intermediate_size", "expert_intermediate_size"):
+            if getattr(obj, key, None):
+                return True
+    return False
+
+
+def _expert_tensors(model):
+    """Параметры экспертов по имени модуля (experts / moe): сбрасываем из RAM
+    только их страницы, а не всю модель."""
+    out, seen = [], set()
+    for name, p in model.named_parameters(remove_duplicate=False):
+        if p is None or p.device.type == "meta":
+            continue
+        low = name.lower()
+        if "expert" not in low and ".moe." not in low and "block_sparse_moe" not in low:
+            continue
+        key = (p.data_ptr(), p.numel())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def trim_expert_pages(model):
+    """Экспериментальный ленивый MoE: выгрузить страницы весов экспертов.
+
+    Linux/macOS — madvise(MADV_DONTNEED) по диапазонам экспертных тензоров
+    (они file-backed из safetensors, поэтому читаются снова с диска).
+    Windows — EmptyWorkingSet процесса.
+
+    Вызывать только после генерации и только для mmap-загрузки: для
+    анонимной памяти MADV_DONTNEED обнулил бы веса.
+    """
+    if not getattr(model, "_moe_lazy", False):
+        return
+    import ctypes
+    import sys
+    try:
+        if os.name == "nt":
+            kernel32 = ctypes.windll.kernel32
+            psapi = ctypes.windll.psapi
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+            psapi.EmptyWorkingSet.restype = ctypes.c_int
+            if not psapi.EmptyWorkingSet(kernel32.GetCurrentProcess()):
+                print("[MoE] EmptyWorkingSet не удался", file=sys.stderr)
+            return
+        import mmap as _mmap
+        libc = ctypes.CDLL(None)
+        madvise = libc.madvise
+        madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        madvise.restype = ctypes.c_int
+        page = _mmap.PAGESIZE
+        for t in getattr(model, "_moe_expert_tensors", None) or []:
+            try:
+                size = t.numel() * t.element_size()
+                if size <= 0:
+                    continue
+                addr = t.data_ptr()
+                start = addr - (addr % page)
+                end = (addr + size + page - 1) // page * page
+                madvise(ctypes.c_void_p(start), ctypes.c_size_t(end - start), 4)  # MADV_DONTNEED
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[MoE] сброс страниц не удался: {e}", file=sys.stderr)
+
+
 def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpointing: bool = True,
-                    force_mmap: bool = None, attn: str = None, quant4=None):
+                    force_mmap: bool = None, attn: str = None, quant4=None,
+                    moe_lazy: bool = False):
     """
     Возвращает (model, info_dict). info: mmap=bool, weights_gb=float, dtype=str, quant=bool.
     mmap включается автоматически, если веса занимают > 70% доступной RAM.
@@ -182,13 +259,33 @@ def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpoint
 
     index, total_bytes, first_dtype = build_shard_index(model_dir)
     avail = psutil.virtual_memory().available
+
+    # Экспериментальный ленивый MoE: cfg нужен до выбора стратегии загрузки.
+    cfg = None
+    moe_active = False
+    if moe_lazy:
+        cfg = AutoConfig.from_pretrained(model_dir)
+        moe_active = _is_moe_config(cfg)
+        if moe_active:
+            print("[MoE] Экспериментальный режим: эксперты читаются с SSD по требованию, "
+                  "после каждой генерации их страницы выгружаются. Это сильно нагружает "
+                  "диск и CPU; работает только для transformers (safetensors), не для GGUF.")
+        else:
+            print("[MoE] В конфиге модели нет экспертов — ленивый режим выключен.")
+
     # 50% доступной RAM: если веса больше — mmap. На 16 ГБ машине это значит,
     # что всё крупнее ~4 ГБ всегда идёт через mmap (безопасно для работы за ПК)
     need_mmap = force_mmap if force_mmap is not None else (total_bytes > 0.50 * avail)
+    if moe_active:
+        need_mmap = True  # без mmap нет ленивой подкачки экспертов
     dtype = _resolve_dtype(dtype_str, first_dtype)
     attn_impl = _resolve_attn(attn)
     info = {"mmap": need_mmap, "weights_gb": total_bytes / 1e9, "dtype": str(dtype),
-            "quant": False}
+            "quant": False, "moe_lazy": moe_active}
+
+    if moe_active and quant4 is True:
+        print("[MoE] 4-bit GPU несовместим с ленивым MoE — quant4 отключён, "
+              "грузлю через mmap с диска.")
 
     # QLoRA: 4-битная база для CUDA (авто — когда bf16 не влезет в VRAM)
     import torch as _torch
@@ -199,7 +296,7 @@ def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpoint
             vram = _torch.cuda.get_device_properties(0).total_memory / 1e9
         except Exception:
             vram = 0
-    want_quant = (quant4 is True or
+    want_quant = (not moe_active) and (quant4 is True or
                   (quant4 in (None, "auto") and use_cuda and vram > 0
                    and total_bytes / 1e9 > 0.60 * vram))
     if want_quant:
@@ -240,7 +337,8 @@ def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpoint
         return model, info
 
     print(f"[Loader] Веса {total_bytes/1e9:.1f} ГБ > 50% доступной RAM ({avail/1e9:.1f} ГБ) — mmap-загрузка")
-    cfg = AutoConfig.from_pretrained(model_dir)
+    if cfg is None:
+        cfg = AutoConfig.from_pretrained(model_dir)
     if attn_impl:
         try:
             cfg.attn_implementation = attn_impl
@@ -321,6 +419,12 @@ def load_model_auto(model_dir: str, dtype_str: str = "auto", gradient_checkpoint
         raise RuntimeError(f"После mmap-загрузки остались meta-тензоры: {leftovers[:10]}")
 
     model._mmap_handles = handles  # держим дескрипторы живыми, пока живы mmap-веса
+    if moe_active:
+        experts = _expert_tensors(model)
+        model._moe_lazy = True
+        model._moe_expert_tensors = experts
+        print(f"[MoE] Ленивый режим включён: экспертных тензоров {len(experts)}; "
+              f"страницы выгружаются после каждой генерации.")
     if gradient_checkpointing:
         model.gradient_checkpointing_enable()
     gc_collect = __import__("gc").collect()

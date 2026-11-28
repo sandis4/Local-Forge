@@ -105,6 +105,8 @@ pub struct Chat {
     pub max_tokens: String,
     pub temp: String,
     pub kv_type: String,
+    /// Экспериментальный MoE-режим: читать с диска только вызванные эксперты.
+    pub moe_lazy: bool,
     pub messages: Vec<Msg>,
     pub input: String,
     pub models: Vec<ModelEntry>,
@@ -365,6 +367,7 @@ impl Chat {
             max_tokens: "256".into(),
             temp: "0.7".into(),
             kv_type: "f16".into(),
+            moe_lazy: false,
             messages: Vec::new(),
             input: String::new(),
             models: Vec::new(),
@@ -524,6 +527,7 @@ impl Chat {
             "threads": threads,
             "ctx": ctx,
             "kv_type": self.kv_type,
+            "moe_lazy": self.moe_lazy,
             "api": {"enabled": self.api_enabled, "port": api_port,
                     "host": if self.api_host.trim().is_empty() { "auto" } else { self.api_host.trim() }},
         }));

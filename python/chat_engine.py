@@ -1256,17 +1256,19 @@ class GgufBackend:
 
 
 class TransformersBackend:
-    def __init__(self, model, adapter, threads):
+    def __init__(self, model, adapter, threads, moe_lazy=False):
         self.model_path = model
         self.adapter = adapter
         self.threads = max(1, min(int(threads), physical_cores()))
+        self.moe_lazy = bool(moe_lazy)
         self.model = None
         self.tokenizer = None
+        self._trim = None
 
     def start(self):
         import torch
         from transformers import AutoTokenizer
-        from model_loader import load_model_auto
+        from model_loader import load_model_auto, trim_expert_pages
 
         torch.set_num_threads(max(1, self.threads))
         emit({"ev": "loading", "message": "Загрузка " + self.model_path + " (mmap/offload)…"})
@@ -1276,7 +1278,8 @@ class TransformersBackend:
         self.tokenizer = AutoTokenizer.from_pretrained(tok_src, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        model, info = load_model_auto(self.model_path, gradient_checkpointing=False)
+        model, info = load_model_auto(self.model_path, gradient_checkpointing=False,
+                                      moe_lazy=self.moe_lazy)
         model.eval()
         if self.adapter and os.path.exists(os.path.join(self.adapter, "adapter_config.json")):
             from peft import PeftModel
@@ -1287,6 +1290,9 @@ class TransformersBackend:
             except Exception:
                 pass
         self.model = model
+        if info.get("moe_lazy"):
+            self._trim = trim_expert_pages
+            emit({"ev": "loading", "message": "MoE: эксперты читаются с SSD по требованию (эксперимент)"})
         where = "mmap" if info.get("mmap") else "RAM"
         return "transformers, веса в " + where
 
@@ -1349,6 +1355,8 @@ class TransformersBackend:
                     on_token(piece)
         finally:
             elapsed = max(1e-6, time.time() - started)
+            if self._trim is not None and self.model is not None:
+                self._trim(self.model)
         if holder.get("error"):
             raise RuntimeError(holder["error"])
         return pieces, elapsed
@@ -1461,6 +1469,7 @@ def main():
             adapter = req.get("adapter") or ""
             threads = int(req.get("threads") or os.cpu_count() or 4)
             ctx = int(req.get("ctx") or CTX_DEFAULT)
+            moe_lazy = bool(req.get("moe_lazy"))
             try:
                 kv_type = req.get("kv_type") or "f16"
                 with backend_lock:
@@ -1468,7 +1477,7 @@ def main():
                         backend = GgufBackend(model, threads, ctx, kv_type)
                         backend_kind = "gguf"
                     else:
-                        backend = TransformersBackend(model, adapter, threads)
+                        backend = TransformersBackend(model, adapter, threads, moe_lazy)
                         backend_kind = "transformers"
                     info = backend.start()
                 emit({"ev": "ready", "backend": backend_kind, "info": info})
